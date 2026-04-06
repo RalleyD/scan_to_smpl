@@ -48,10 +48,15 @@ COCO_SKELETON = [
 class KeypointDetector:
     """ViTPose++ keypoint detector via HuggingFace transformers."""
 
+    # ViTPose++ MoE dataset indices (6 experts)
+    # Index 0 = COCO (17 body keypoints) — the one we use
+    DATASET_INDEX_COCO = 0
+
     def __init__(
         self,
         model_id: str = "usyd-community/vitpose-plus-base",
         device: str = "cpu",
+        dataset_index: int = 0,
     ):
         from transformers import VitPoseForPoseEstimation, VitPoseImageProcessor
 
@@ -60,7 +65,8 @@ class KeypointDetector:
         self.model = VitPoseForPoseEstimation.from_pretrained(model_id).to(device)
         self.model.eval()
         self.device = device
-        logger.info("ViTPose++ loaded on %s", device)
+        self.dataset_index = dataset_index
+        logger.info("ViTPose++ loaded on %s (dataset_index=%d)", device, dataset_index)
 
     @torch.no_grad()
     def detect(self, image: Image.Image, bbox: np.ndarray) -> KeypointResult:
@@ -78,7 +84,9 @@ class KeypointDetector:
         boxes = [[[float(c) for c in bbox]]]
 
         inputs = self.processor(images=image, boxes=boxes, return_tensors="pt").to(self.device)
-        outputs = self.model(**inputs)
+        # ViTPose++ requires dataset_index to select the MoE expert head
+        dataset_index = torch.tensor([self.dataset_index], device=self.device)
+        outputs = self.model(**inputs, dataset_index=dataset_index)
 
         w, h = image.size
         results = self.processor.post_process_pose_estimation(

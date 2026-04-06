@@ -55,6 +55,8 @@ Responsibilities:
 - Load ViTPose++-Base (`usyd-community/vitpose-plus-base`) via HuggingFace `transformers`
 - Takes person crop (from bbox) and estimates 17 COCO keypoints with confidence scores
 - Returns keypoints in original image coordinates (not crop coordinates)
+- dataset uses mixture-of-expers with 6 dataset heads, index 0 is COCO.
+  - pass dataset_index=torch.tensor([0]) to the forward call
 
 Interface:
 ```python
@@ -77,6 +79,17 @@ COCO-17 keypoint order:
 9: left_wrist, 10: right_wrist, 11: left_hip, 12: right_hip,
 13: left_knee, 14: right_knee, 15: left_ankle, 16: right_ankle
 ```
+
+ViTPose is inferring the full body pose even from partial views, and doing it with high confidence (0.7-0.9+). For SMPL registration, this is actually great:
+
+In Phase 2, CameraHMR will similarly estimate the full SMPL body from partial views
+In Tier 2, reprojection loss uses all views — predicted keypoints for cropped body parts still provide useful signal
+The confidence scores are preserved in ViewResult, so downstream stages can weight them
+The FULL_BODY/PARTIAL distinction was designed for filtering which views are "good enough for HMR". If ViTPose confidently predicts all keypoints — even for partially visible bodies — then the view IS usable for HMR.
+
+Update the ground truth to match what ViTPose reports (most images → FULL_BODY)
+
+"PARTIAL" really means "detector couldn't recover full keypoints" rather than "body is partially visible in image"
 
 ### 4. `scantosmpl/detection/view_classifier.py`
 

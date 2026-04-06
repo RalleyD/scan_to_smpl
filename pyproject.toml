@@ -49,6 +49,8 @@ markers = [
     "slow: takes >10s",
     "requires_smpl: requires SMPL model files in models/smpl/",
 ]
+# By default, only run unit tests. Use `pytest tests/integration/` for integration tests.
+addopts = "--ignore=tests/integration"
 
 [tool.mypy]
 python_version = "3.10"

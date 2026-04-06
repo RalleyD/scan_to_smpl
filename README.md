@@ -49,6 +49,15 @@ utils/clean_smpl.py
 	from scantosmpl.utils.clean_smpl import clean_smpl_pkl, clean_directory
 	clean_directory(Path("models/smpl/"))
 
+
+## tests
+
+### Integration tests (requires scanner images + downloads models):
+pytest tests/integration/ -v
+
+### All tests:
+pytest tests/ --no-header -v
+
 ## TODOs
 
 - remove smplx submodule - no longer needed for chumpy cleaning
