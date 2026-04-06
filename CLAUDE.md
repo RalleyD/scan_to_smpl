@@ -294,27 +294,11 @@ COCO_TO_SMPL = {
 
 ## Dependencies
 
-```toml
-[project]
-requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.0",
-    "smplx>=0.1.28",
-    "kaolin>=0.17",        # Chamfer distance (replaces PyTorch3D)
-    "opencv-python>=4.8",
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "transformers>=5.1",   # ViTPose++, RT-DETR
-    "Pillow>=10.0",
-    "open3d>=0.17",
-    "trimesh>=4.0",
-    "click>=8.0",
-    "tqdm",
-]
+`.devcontainer/Dockerfile`
 
-[project.optional-dependencies]
-viz = ["pyvista", "matplotlib"]
-vposer = ["human_body_prior"]  # Optional pose prior upgrade
+`./pyproject.toml`
+
+
 ```
 
 ### Model Downloads Required

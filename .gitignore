@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Large files / licensed models
+data/
+models/
+*.pkl
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# HuggingFace cache
+.cache/
+
+# Output
+output/
+*.obj
+*.ply
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

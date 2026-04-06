@@ -20,14 +20,14 @@ You can deliver Tier 1 while still building Tier 2+3.
 Project structure, dependencies, SMPL forward pass verified on GPU.
 
 ### Deliverables
-- [ ] `pyproject.toml` with all dependencies (torch, smplx, kaolin, transformers, opencv, open3d, click)
-- [ ] Package structure per CLAUDE.md
-- [ ] `scantosmpl/smpl/model.py` — SMPL/SMPL-X wrapper with differentiable forward pass
-- [ ] `scantosmpl/config.py` — Dataclass config
-- [ ] `scantosmpl/types.py` — ViewType, FittingResult, CameraParams
-- [ ] `tests/test_smpl_model.py`
-- [ ] `data/body_models/README.md` — download instructions for SMPL .pkl files
-- [ ] Verify Kaolin installs cleanly: `from kaolin.metrics.pointcloud import chamfer_distance`
+- [x] `pyproject.toml` with all dependencies (torch, smplx, kaolin, transformers, opencv, open3d, click)
+- [x] Package structure per CLAUDE.md
+- [x] `scantosmpl/smpl/model.py` — SMPL/SMPL-X wrapper with differentiable forward pass
+- [x] `scantosmpl/config.py` — Dataclass config
+- [x] `scantosmpl/types.py` — ViewType, FittingResult, CameraParams
+- [x] `tests/test_smpl_model.py`
+- [x] `data/body_models/README.md` — download instructions for SMPL .pkl files
+- [x] Verify Kaolin installs cleanly: `from kaolin.metrics.pointcloud import chamfer_distance`
 
 ### Acceptance Criteria
 
@@ -49,12 +49,12 @@ Load images with EXIF normalisation, extract intrinsics, run RT-DETR + ViTPose++
 classify views as full-body/partial/unusable.
 
 ### Deliverables
-- [ ] `scantosmpl/detection/image_loader.py` — EXIF transpose + intrinsics extraction (FocalLengthIn35mmFilm → K)
-- [ ] `scantosmpl/detection/person_detector.py` — RT-DETR via HuggingFace
-- [ ] `scantosmpl/detection/keypoint_detector.py` — ViTPose++-Base via HuggingFace
-- [ ] `scantosmpl/detection/view_classifier.py` — classify by joint visibility ratio
-- [ ] `tests/test_detection.py`, `tests/test_image_loader.py`
-- [ ] Viz: overlay keypoints on images
+- [x] `scantosmpl/detection/image_loader.py` — EXIF transpose + intrinsics extraction (FocalPlaneXResolution → K)
+- [x] `scantosmpl/detection/person_detector.py` — RT-DETR via HuggingFace
+- [x] `scantosmpl/detection/keypoint_detector.py` — ViTPose++-Base via HuggingFace
+- [x] `scantosmpl/detection/view_classifier.py` — classify by joint visibility ratio
+- [x] `tests/test_detection.py`
+- [x] Viz: overlay keypoints on images (via DetectionPipeline debug output)
 
 ### Acceptance Criteria
 

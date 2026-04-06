@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scantosmpl"
+version = "0.1.0"
+description = "Multi-view / point cloud to SMPL registration pipeline"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "torch>=2.0",
+    "torchvision",
+    "smplx>=0.1.28",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "transformers>=4.45",
+    "Pillow>=10.0",
+    "open3d>=0.17",
+    "trimesh>=4.0",
+    "click>=8.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+kaolin = ["kaolin>=0.17"]
+viz = ["pyvista", "matplotlib"]
+vposer = ["human_body_prior"]
+dev = ["pytest", "ruff", "mypy", "piexif"]
+
+[project.scripts]
+scantosmpl = "scantosmpl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["scantosmpl*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires GPU",
+    "slow: takes >10s",
+    "requires_smpl: requires SMPL model files in models/smpl/",
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
