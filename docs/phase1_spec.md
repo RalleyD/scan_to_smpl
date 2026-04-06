@@ -145,10 +145,48 @@ Flow per image:
 
 ### 6. Debug output
 
+```
+python -c "
+from scantosmpl.detection.pipeline import DetectionPipeline
+from pathlib import Path
+
+pipeline = DetectionPipeline(device='cuda')
+results = pipeline.process_directory(
+    Path('data/t-pose/jpg'),
+    debug_dir=Path('output/debug/detection'),
+)
+print(f'\nProcessed {len(results)} images')
+for r in results:
+    n_vis = int((r.keypoint_confs > 0.3).sum()) if r.keypoint_confs is not None else 0
+    print(f'  {r.image_path.name}: {r.view_type.value} ({n_vis}/17 kps)')
+"
+```
+
 Save to `{output_dir}/debug/detection/`:
 - `detections.json` — per-image: bbox, keypoints, confidences, classification, intrinsics
 - `{image_name}_keypoints.jpg` — image with overlaid skeleton + bbox + classification label
 - `summary.txt` — counts per classification, aggregate keypoint stats
+
+```
+Processed 17 images
+  cam01_2.JPG: full_body (17/17 kps)
+  cam01_6.JPG: full_body (17/17 kps)
+  cam02_4.JPG: full_body (16/17 kps)
+  cam02_5.JPG: full_body (15/17 kps)
+  cam03_5.JPG: full_body (17/17 kps)
+  cam03_6.JPG: full_body (16/17 kps)
+  cam04_4.JPG: full_body (17/17 kps)
+  cam04_5.JPG: full_body (17/17 kps)
+  cam05_4.JPG: full_body (17/17 kps)
+  cam05_5.JPG: partial (15/17 kps)
+  cam05_6.JPG: full_body (17/17 kps)
+  cam06_4.JPG: full_body (17/17 kps)
+  cam07_4.JPG: full_body (17/17 kps)
+  cam07_6.JPG: full_body (17/17 kps)
+  cam10_2.JPG: full_body (17/17 kps)
+  cam10_4.JPG: full_body (17/17 kps)
+  cam10_5.JPG: full_body (17/17 kps)
+```
 
 ### 7. `tests/test_detection.py`
 
