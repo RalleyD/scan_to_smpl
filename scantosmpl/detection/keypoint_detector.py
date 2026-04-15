@@ -88,11 +88,9 @@ class KeypointDetector:
         dataset_index = torch.tensor([self.dataset_index], device=self.device)
         outputs = self.model(**inputs, dataset_index=dataset_index)
 
-        w, h = image.size
         results = self.processor.post_process_pose_estimation(
             outputs,
             boxes=boxes,
-            target_sizes=[(h, w)],
         )
 
         # results is list[list[dict]] — one list per image, one dict per person

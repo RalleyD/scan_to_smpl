@@ -234,11 +234,11 @@ We need sensor width. Options:
 
 This is a Phase 1 "best effort". Phase 2's CameraHMR will predict FoV directly, giving us a second (often better) intrinsics estimate.
 
-## Expected Outputs (19 images)
+## Expected Outputs (17 images)
 
 Given the dataset characteristics:
-- ~3-8 FULL_BODY views (subject visible head-to-toe)
-- ~10-15 PARTIAL views (subject mostly visible, some extremities cropped)
+- 16 FULL_BODY views (subject visible head-to-toe)
+- 1 PARTIAL views (subject mostly visible, some extremities cropped)
 - 0 SKIP views (all images have been manually filtered)
 
 These numbers will be validated against the ground truth CSV.
