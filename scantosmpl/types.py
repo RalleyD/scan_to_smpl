@@ -25,6 +25,9 @@ class CameraParams:
     principal_point: tuple[float, float] = (0.0, 0.0)  # (cx, cy)
     fov: float | None = None  # degrees, from CameraHMR HumanFoV
 
+    # HMR camera translation (Phase 2 — weak-perspective → 3D)
+    hmr_translation: np.ndarray | None = None  # (3,) camera-space translation from CameraHMR
+
     # Extrinsics (recovered in Tier 2)
     rotation: np.ndarray | None = None  # (3, 3)
     translation: np.ndarray | None = None  # (3,)

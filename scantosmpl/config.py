@@ -39,9 +39,18 @@ class DetectionConfig:
 class HMRConfig:
     """HMR (Human Mesh Recovery) configuration."""
 
-    backend: Literal["camerahmr", "prompthmr"] = "camerahmr"
-    batch_size: int = 4
+    backend: Literal["camerahmr"] = "camerahmr"
     device: str = "cuda"
+    checkpoint_path: Path = Path("models/checkpoints/camera_hmr/camerahmr_checkpoint_cleaned.ckpt")
+    densekp_path: Path = Path("models/checkpoints/camera_hmr/densekp.ckpt")
+    cam_model_path: Path = Path("models/checkpoints/camera_hmr/cam_model_cleaned.ckpt")
+    smpl_mean_params_path: Path = Path("models/smpl/smpl_mean_params.npz")
+    smpl_model_path: Path = Path("models/smpl/SMPL_NEUTRAL.pkl")
+    crop_size: int = 256
+    batch_size: int = 4
+    process_partial_views: bool = True
+    save_debug: bool = True
+    debug_dir: Path = Path("output/debug/hmr")
 
 
 @dataclass

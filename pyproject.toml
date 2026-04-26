@@ -21,6 +21,13 @@ dependencies = [
     "trimesh>=4.0",
     "click>=8.0",
     "tqdm",
+    # Phase 2: CameraHMR deps
+    "pytorch-lightning>=2.0.2",
+    "timm>=0.6.12",
+    "einops>=0.6.0",
+    "yacs>=0.1.8",
+    "loguru",
+    "omegaconf",
 ]
 
 [project.optional-dependencies]
