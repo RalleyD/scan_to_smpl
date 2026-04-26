@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from tqdm import tqdm
 
 from scantosmpl.config import HMRConfig
@@ -155,7 +155,7 @@ class HMRPipeline:
 
         for view in tqdm(to_process, desc="CameraHMR", unit="view"):
             image_path = image_dir / view.image_path.name
-            image = Image.open(image_path)
+            image = ImageOps.exif_transpose(Image.open(image_path))
 
             focal_length_px = (
                 view.camera.focal_length if view.camera is not None else _default_focal(image)
@@ -403,7 +403,7 @@ class HMRPipeline:
             view = view_map.get(name)
             if view is not None and view.keypoints_2d is not None:
                 img_path = view.image_path
-                img = Image.open(img_path) if img_path.exists() else None
+                img = ImageOps.exif_transpose(Image.open(img_path)) if img_path.exists() else None
                 hw = (img.height, img.width) if img is not None else (1000, 1000)
                 confs = view.keypoint_confs if view.keypoint_confs is not None else np.zeros(17)
                 quality = check_orientation_quality(
