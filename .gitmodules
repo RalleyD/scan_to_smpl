@@ -1,0 +1,6 @@
+[submodule "external/smplx"]
+	path = external/smplx
+	url = https://github.com/vchoutas/smplx.git
+[submodule "external/CameraHMR"]
+	path = external/CameraHMR
+	url = https://github.com/pixelite1201/CameraHMR.git
