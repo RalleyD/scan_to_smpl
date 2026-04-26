@@ -39,6 +39,73 @@ class HMRPipeline:
         return self._inference
 
     # ------------------------------------------------------------------
+    # HMR suitability filter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assess_hmr_suitability(
+        view: ViewResult,
+        min_conf: float = 0.3,
+        min_spread_ratio: float = 0.12,
+        min_torso_ratio: float = 0.23,
+    ) -> bool:
+        """
+        Decide whether a view is suitable for CameraHMR.
+
+        CameraHMR is trained on frontal/near-frontal images.  Two failure modes are
+        detectable from Phase 1 keypoints:
+
+        1. **Pure side view** — shoulder horizontal spread < 12 % of bbox width.
+           Both shoulders are nearly stacked; the body is seen edge-on.
+           (Catches cam02_4 @ 0.07, cam06_4 @ 0.02)
+
+        2. **Floor-up / extreme elevation angle** — torso fraction
+           (hip_y − shoulder_y) / bbox_height < 23 %.
+           The torso appears compressed because the camera looks up at the subject.
+           (Catches cam07_6 @ 0.22; all normal views ≥ 0.23)
+
+        Returns True if the view passes both checks, False otherwise.
+        Defaults to True when keypoints are unavailable (benefit of the doubt).
+        """
+        kps = view.keypoints_2d
+        confs = view.keypoint_confs
+        bbox = view.bbox
+
+        if kps is None or confs is None or bbox is None:
+            return True  # no evidence to exclude
+
+        # COCO-17 indices
+        L_SHOULDER, R_SHOULDER = 5, 6
+        L_HIP, R_HIP = 11, 12
+
+        l_sh_ok = confs[L_SHOULDER] >= min_conf
+        r_sh_ok = confs[R_SHOULDER] >= min_conf
+        l_hip_ok = confs[L_HIP] >= min_conf
+        r_hip_ok = confs[R_HIP] >= min_conf
+
+        # --- Check 1: shoulder spread (side-view filter) ---
+        if l_sh_ok and r_sh_ok:
+            bbox_w = float(bbox[2] - bbox[0])
+            spread = abs(float(kps[L_SHOULDER, 0]) - float(kps[R_SHOULDER, 0]))
+            if bbox_w > 0 and (spread / bbox_w) < min_spread_ratio:
+                return False
+
+        # --- Check 2: torso fraction (floor-up / elevation filter) ---
+        if l_sh_ok and r_sh_ok and (l_hip_ok or r_hip_ok):
+            bbox_h = float(bbox[3] - bbox[1])
+            sh_y = (float(kps[L_SHOULDER, 1]) + float(kps[R_SHOULDER, 1])) / 2.0
+            hip_ys = []
+            if l_hip_ok:
+                hip_ys.append(float(kps[L_HIP, 1]))
+            if r_hip_ok:
+                hip_ys.append(float(kps[R_HIP, 1]))
+            hip_y = float(np.mean(hip_ys))
+            if bbox_h > 0 and (hip_y - sh_y) / bbox_h < min_torso_ratio:
+                return False
+
+        return True
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -62,10 +129,20 @@ class HMRPipeline:
         if debug_dir is not None:
             debug_dir.mkdir(parents=True, exist_ok=True)
 
+        # Stamp suitability flag on every non-SKIP view before filtering
+        for v in views:
+            if v.view_type != ViewType.SKIP and v.bbox is not None:
+                v.hmr_suitable = self._assess_hmr_suitability(v)
+
         to_process = [
             v for v in views
-            if v.view_type != ViewType.SKIP and v.bbox is not None
+            if v.view_type != ViewType.SKIP and v.bbox is not None and v.hmr_suitable
         ]
+
+        unsuitable = [v for v in views if v.view_type != ViewType.SKIP and not v.hmr_suitable]
+        if unsuitable:
+            names = ", ".join(v.image_path.name for v in unsuitable)
+            print(f"[HMR] Skipping {len(unsuitable)} unsuitable view(s): {names}")
 
         if not to_process:
             print("[HMR] No processable views found.")
@@ -149,52 +226,80 @@ class HMRPipeline:
         output_path: Path,
     ) -> None:
         """
-        Project SMPL mesh onto the image and draw edges with PIL.
+        Project SMPL mesh onto the image with grey face shading and purple edges.
 
-        Only edges with both endpoints in front of the camera (Z > 0) are drawn.
-        Edges are subsampled if there are more than 4000 (keeps overlay readable).
+        Rendering steps:
+          1. Filter faces: all 3 vertices must be in front of the camera (Z > 0.01).
+          2. Back-face cull: discard faces whose projected 2D winding is clockwise
+             (rear-facing in SMPL's CCW-Y-down convention).
+          3. Painter's algorithm: sort front faces far-to-near and draw grey filled
+             polygons on a transparent RGBA overlay.
+          4. Draw purple edges on top (edges_unique, subsampled to ≤ 4000).
+          5. Alpha-composite the overlay onto the source image and save.
         """
         import trimesh
 
-        # Project vertices into image space: pts_2d = K @ v / v.z
         v = vertices_3d.copy()  # (6890, 3), already in camera space
-        pts_cam = v  # camera frame
-        mask_front = pts_cam[:, 2] > 0.01  # front-facing vertices
+        v_z = v[:, 2]
+        W, H = image.size
 
-        # Full projection
-        pts_h = (K @ pts_cam.T).T  # (6890, 3)
-        pts_2d = pts_h[:, :2] / (pts_h[:, 2:3] + 1e-9)  # (6890, 2)
+        # Project all vertices
+        pts_h = (K @ v.T).T                             # (6890, 3)
+        pts_2d = pts_h[:, :2] / (pts_h[:, 2:3] + 1e-9) # (6890, 2)
 
-        # Extract unique edges
+        # --- Face shading: grey semi-transparent filled polygons ---
+        f = np.asarray(faces)
+        all_front = (v_z[f[:, 0]] > 0.01) & (v_z[f[:, 1]] > 0.01) & (v_z[f[:, 2]] > 0.01)
+        vis_faces = f[all_front]
+
+        # Back-face culling via 2D cross product.
+        # SMPL uses CCW winding in 3D; with Y flipped to image space the sign reverses,
+        # so front-facing projected triangles have cross > 0.
+        v0 = pts_2d[vis_faces[:, 0]]
+        v1 = pts_2d[vis_faces[:, 1]]
+        v2 = pts_2d[vis_faces[:, 2]]
+        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) \
+              - (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+        vis_faces = vis_faces[cross > 0]
+
+        # Painter's algorithm: draw far faces first so near faces paint over them
+        z_cent = (v_z[vis_faces[:, 0]] + v_z[vis_faces[:, 1]] + v_z[vis_faces[:, 2]]) / 3.0
+        vis_faces = vis_faces[np.argsort(z_cent)[::-1]]
+
+        # Draw on a transparent RGBA layer, then composite over the photo
+        base = image.convert("RGBA")
+        layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+
+        GREY = (160, 160, 160, 110)   # semi-transparent grey fill
+        margin = 200                   # allow slightly off-screen polys
+        for face in vis_faces:
+            p0 = (float(pts_2d[face[0], 0]), float(pts_2d[face[0], 1]))
+            p1 = (float(pts_2d[face[1], 0]), float(pts_2d[face[1], 1]))
+            p2 = (float(pts_2d[face[2], 0]), float(pts_2d[face[2], 1]))
+            if all(-margin <= p[0] <= W + margin and -margin <= p[1] <= H + margin
+                   for p in (p0, p1, p2)):
+                draw.polygon([p0, p1, p2], fill=GREY)
+
+        # --- Edge drawing: purple ---
         mesh = trimesh.Trimesh(vertices=v, faces=faces, process=False)
-        edges = mesh.edges_unique  # (E, 2)
-
-        # Keep only edges where both vertices are in front of the camera
-        both_front = mask_front[edges[:, 0]] & mask_front[edges[:, 1]]
+        edges = mesh.edges_unique                              # (E, 2)
+        both_front = (v_z[edges[:, 0]] > 0.01) & (v_z[edges[:, 1]] > 0.01)
         edges = edges[both_front]
 
-        # Subsample if dense
         max_edges = 4000
         if len(edges) > max_edges:
-            idx = np.linspace(0, len(edges) - 1, max_edges, dtype=int)
-            edges = edges[idx]
+            edges = edges[np.linspace(0, len(edges) - 1, max_edges, dtype=int)]
 
-        # Draw on a copy of the source image
-        overlay = image.convert("RGB").copy()
-        draw = ImageDraw.Draw(overlay)
-        W, H = overlay.size
-
+        PURPLE = (148, 103, 189, 230)  # muted purple, nearly opaque
         for e0, e1 in edges:
             x0, y0 = float(pts_2d[e0, 0]), float(pts_2d[e0, 1])
             x1, y1 = float(pts_2d[e1, 0]), float(pts_2d[e1, 1])
-            # Clip to image bounds before drawing
-            if (
-                0 <= x0 <= W and 0 <= y0 <= H
-                and 0 <= x1 <= W and 0 <= y1 <= H
-            ):
-                draw.line([(x0, y0), (x1, y1)], fill=(0, 255, 100), width=1)
+            if 0 <= x0 <= W and 0 <= y0 <= H and 0 <= x1 <= W and 0 <= y1 <= H:
+                draw.line([(x0, y0), (x1, y1)], fill=PURPLE, width=1)
 
-        overlay.save(output_path, quality=90)
+        result = Image.alpha_composite(base, layer)
+        result.convert("RGB").save(output_path, quality=90)
 
     # ------------------------------------------------------------------
     # Debug output
@@ -233,6 +338,8 @@ class HMRPipeline:
             "=" * 72,
             "",
             f"Total views processed : {len(hmr_outputs)}",
+            f"Views skipped (unsuitable): "
+            + (", ".join(v.image_path.name for v in views if not v.hmr_suitable) or "none"),
             f"Elapsed               : {elapsed:.1f}s",
             f"  ({elapsed / max(len(hmr_outputs), 1):.1f}s per image)",
             "",

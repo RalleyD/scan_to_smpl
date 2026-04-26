@@ -69,6 +69,11 @@ class ViewResult:
     dense_keypoints_2d: np.ndarray | None = None  # (138, 2)
     dense_keypoint_confs: np.ndarray | None = None  # (138,)
 
+    # HMR suitability flag (Phase 2)
+    # False for pure side views or extreme floor-up angles where CameraHMR is unreliable.
+    # The view is still valid for Phase 1 detection and Tier 2 PnP.
+    hmr_suitable: bool = True
+
 
 @dataclass
 class SMPLOutput:

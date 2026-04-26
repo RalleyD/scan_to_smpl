@@ -247,10 +247,13 @@ class TestHMRPipelineAllImages:
     def test_all_views_produce_output(self, pipeline_results):
         views, _ = pipeline_results
         from scantosmpl.types import ViewType
-        processable = [v for v in views if v.view_type in (ViewType.FULL_BODY, ViewType.PARTIAL)]
+        suitable = [
+            v for v in views
+            if v.view_type in (ViewType.FULL_BODY, ViewType.PARTIAL) and v.hmr_suitable
+        ]
         hmr_done = [v for v in views if v.betas is not None]
-        assert len(hmr_done) == len(processable), (
-            f"Only {len(hmr_done)}/{len(processable)} views have HMR output"
+        assert len(hmr_done) == len(suitable), (
+            f"Only {len(hmr_done)}/{len(suitable)} suitable views have HMR output"
         )
 
     def test_beta_std_below_threshold(self, pipeline_results):
