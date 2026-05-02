@@ -21,6 +21,7 @@ from scantosmpl.types import CameraParams, ViewResult, ViewType
 # ViTPose hallucinates face keypoints on rear views, so automated detection
 # is unreliable — manual exclusion is the pragmatic choice.
 DEFAULT_HMR_EXCLUSIONS: dict[str, str] = {
+    "cam05_6": "right-rear ground-up angle",
     "cam10_4": "rear view",
     "cam10_5": "rear view",
 }

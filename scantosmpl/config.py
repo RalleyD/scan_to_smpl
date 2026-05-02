@@ -54,6 +54,18 @@ class HMRConfig:
 
 
 @dataclass
+class ConsensusConfig:
+    """Multi-view consensus configuration (Phase 3 / Tier 1)."""
+
+    trim_fraction: float = 0.1       # fraction to trim from each tail for robust mean
+    frechet_max_iter: int = 50       # SO(3) mean max iterations
+    frechet_tol: float = 1e-7        # convergence tolerance
+    min_views: int = 3               # minimum views required for consensus
+    save_debug: bool = True
+    debug_dir: Path = Path("output/debug/consensus")
+
+
+@dataclass
 class CalibrationConfig:
     """Self-calibration configuration."""
 
@@ -114,6 +126,7 @@ class PipelineConfig:
     model_paths: ModelPaths = field(default_factory=ModelPaths)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     hmr: HMRConfig = field(default_factory=HMRConfig)
+    consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     fitting: FittingConfig = field(default_factory=FittingConfig)
 

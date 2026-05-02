@@ -73,10 +73,10 @@ def detection_views():
             vt_str, ViewType.SKIP
         )
         bbox = np.array(det["bbox"], dtype=np.float32) if det.get("bbox") else None
-        kps = np.array(det["keypoints_2d"], dtype=np.float32) if det.get("keypoints_2d") else None
-        confs = (
-            np.array(det["keypoint_confs"], dtype=np.float32) if det.get("keypoint_confs") else None
-        )
+        kps_raw = det.get("keypoints_2d") or det.get("keypoints")
+        kps = np.array(kps_raw, dtype=np.float32) if kps_raw is not None else None
+        confs_raw = det.get("keypoint_confs") or det.get("keypoint_confidences")
+        confs = np.array(confs_raw, dtype=np.float32) if confs_raw is not None else None
         fl = float(det.get("focal_length_px", EXIF_FOCAL_PX))
         camera = CameraParams(focal_length=fl, principal_point=(0.0, 0.0))
 
