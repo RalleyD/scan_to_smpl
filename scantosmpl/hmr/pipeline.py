@@ -8,10 +8,22 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 from tqdm import tqdm
 
+from scantosmpl.detection.image_loader import load_image
+
 from scantosmpl.config import HMRConfig
 from scantosmpl.hmr.camera_hmr import CameraHMRInference, HMROutput
 from scantosmpl.hmr.orientation import check_orientation_quality
 from scantosmpl.types import CameraParams, ViewResult, ViewType
+
+# Views manually excluded from CameraHMR: filename stem → reason.
+# These are still valid for Phase 1 detection and Tier 2 PnP, but CameraHMR
+# produces unreliable SMPL estimates on rear/oblique views.
+# ViTPose hallucinates face keypoints on rear views, so automated detection
+# is unreliable — manual exclusion is the pragmatic choice.
+DEFAULT_HMR_EXCLUSIONS: dict[str, str] = {
+    "cam10_4": "rear view",
+    "cam10_5": "rear view",
+}
 
 
 class HMRPipeline:
@@ -45,6 +57,7 @@ class HMRPipeline:
     @staticmethod
     def _assess_hmr_suitability(
         view: ViewResult,
+        exclusions: dict[str, str] | None = None,
         min_conf: float = 0.3,
         min_spread_ratio: float = 0.12,
         min_torso_ratio: float = 0.23,
@@ -52,8 +65,12 @@ class HMRPipeline:
         """
         Decide whether a view is suitable for CameraHMR.
 
-        CameraHMR is trained on frontal/near-frontal images.  Two failure modes are
-        detectable from Phase 1 keypoints:
+        CameraHMR is trained on frontal/near-frontal images.  Three exclusion
+        criteria are checked:
+
+        0. **Manual exclusion list** — rear views and other problematic angles
+           identified by visual inspection.  ViTPose hallucinates face keypoints
+           on rear views so automated nose/eye-based detection is unreliable.
 
         1. **Pure side view** — shoulder horizontal spread < 12 % of bbox width.
            Both shoulders are nearly stacked; the body is seen edge-on.
@@ -64,9 +81,14 @@ class HMRPipeline:
            The torso appears compressed because the camera looks up at the subject.
            (Catches cam07_6 @ 0.22; all normal views ≥ 0.23)
 
-        Returns True if the view passes both checks, False otherwise.
+        Returns True if the view passes all checks, False otherwise.
         Defaults to True when keypoints are unavailable (benefit of the doubt).
         """
+        # Check 0: manual exclusion list
+        excl = exclusions if exclusions is not None else DEFAULT_HMR_EXCLUSIONS
+        if view.image_path.stem in excl:
+            return False
+
         kps = view.keypoints_2d
         confs = view.keypoint_confs
         bbox = view.bbox
@@ -155,7 +177,8 @@ class HMRPipeline:
 
         for view in tqdm(to_process, desc="CameraHMR", unit="view"):
             image_path = image_dir / view.image_path.name
-            image = ImageOps.exif_transpose(Image.open(image_path))
+            loaded = load_image(image_path)
+            image = loaded.image
 
             focal_length_px = (
                 view.camera.focal_length if view.camera is not None else _default_focal(image)
@@ -403,7 +426,7 @@ class HMRPipeline:
             view = view_map.get(name)
             if view is not None and view.keypoints_2d is not None:
                 img_path = view.image_path
-                img = ImageOps.exif_transpose(Image.open(img_path)) if img_path.exists() else None
+                img = load_image(img_path).image if img_path.exists() else None
                 hw = (img.height, img.width) if img is not None else (1000, 1000)
                 confs = view.keypoint_confs if view.keypoint_confs is not None else np.zeros(17)
                 quality = check_orientation_quality(

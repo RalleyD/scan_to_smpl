@@ -63,6 +63,55 @@ FLNet	cam_model_cleaned.ckpt	Focal length / FoV from image	?
 DenseKP	densekp.ckpt	138 dense 3D surface keypoints	?
 The 138 dense keypoints (REVIEW.md criterion 2.3) come from a separate model, not the main CameraHMR checkpoint. And the FoV estimation (criterion 2.2) comes from FLNet, also separate.
 
+
+View	Spread	Torso frac	Excluded?	Reason
+cam02_4	0.07	0.28	yes	pure side view (spread < 0.12)
+cam06_4	0.02	0.28	yes	pure side view (spread < 0.12)
+cam07_6	0.26	0.22	yes	floor-up angle (torso < 0.23)
+all others	≥ 0.17	≥ 0.23	no	—
+
+CameraHMR submodule (external/CameraHMR)
+
+Added as a git submodule (master branch, commit b1b6eea)
+Fixed upstream syntax error in densekp_model.py (def forward(self, batch) missing colon)
+New/modified files:
+
+File	What it does
+scantosmpl/hmr/camera_hmr.py	CameraHMRInference: loads all three models, monkey-patches SMPL_MEAN_PARAMS_FILE, shared ViT-H backbone, CLIFF camera conversion, DenseKP keypoint denormalisation
+scantosmpl/hmr/orientation.py	check_orientation_quality: upright check, rotation magnitude, T-pose arm check → score + warnings
+scantosmpl/hmr/pipeline.py	HMRPipeline: orchestrates all views, PIL wireframe overlay, JSON + summary debug output
+scantosmpl/hmr/init.py	Clean exports
+scantosmpl/config.py	HMRConfig with all checkpoint paths
+scantosmpl/types.py	CameraParams.hmr_translation added
+pyproject.toml	Added pytorch-lightning, timm, einops, yacs, loguru
+tests/test_hmr.py	8 test classes, no GPU needed
+tests/integration/test_hmr_integration.py	5 test classes covering criteria 2.1–2.7
+Run commands:
+
+
+# Install new deps first
+pip install -e ".[dev]"
+
+# Unit tests (no GPU)
+pytest tests/test_hmr.py -v
+
+# Integration tests (GPU + checkpoints)
+pytest tests/integration/test_hmr_integration.py -v -m gpu
+
+# End-to-end debug run
+python -c "
+from pathlib import Path
+from scantosmpl.detection.pipeline import DetectionPipeline
+from scantosmpl.hmr.pipeline import HMRPipeline
+from scantosmpl.config import HMRConfig
+
+det = DetectionPipeline(device='cuda')
+views = det.process_directory(Path('data/t-pose/jpg'), debug_dir=Path('output/debug/detection'))
+hmr = HMRPipeline(HMRConfig(), device='cuda')
+views = hmr.process_views(views, Path('data/t-pose/jpg'), debug_dir=Path('output/debug/hmr'))
+"
+# Inspect output/debug/hmr/summary.txt and *_hmr_overlay.jpg
+
 Additionally, the model needs smpl_mean_params.npz for initialisation.
 
 ## tests
