@@ -1,214 +1,238 @@
 
+# ScanToSMPL
 
-## implementation phases
+**Calibration-free SMPL registration from multi-view images and photogrammetry point clouds.**
 
-## phase 0 - scaffolding
+Fits a parametric SMPL body mesh to ~60 uncalibrated scanner images — no camera extrinsics required. Camera geometry is self-recovered using the body mesh as a calibration target.
 
-.devcontainer/Dockerfile	
+![CameraHMR](https://img.shields.io/badge/HMR-CameraHMR-blue)
+![PromptHMR](https://img.shields.io/badge/HMR_fallback-PromptHMR-blue)
+![ViTPose++](https://img.shields.io/badge/Keypoints-ViTPose++-green)
+![RT--DETR](https://img.shields.io/badge/Detection-RT--DETR-green)
+![Kaolin](https://img.shields.io/badge/Chamfer-NVIDIA_Kaolin-76b900)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c)
+![CUDA](https://img.shields.io/badge/CUDA-11.8%2B-76b900)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
+![License](https://img.shields.io/badge/License-MIT-yellow)
 
-    Python 3.10 + PyTorch 2.4 + CUDA 12.1 + all deps
+---
 
-.devcontainer/devcontainer.json	
+## Results
 
-    VSCode devcontainer config with GPU support
+| Ground truth scan | Tier 1 — CameraHMR consensus mesh |
+|:-----------------:|:---------------------------------:|
+| ![Ground truth placeholder](docs/images/photogrammetry_point_cloud.png) | ![Tier 1 SMPL mesh placeholder](docs/images/consensus_smpl_zero_cal.png) |
+| *Photogrammetry point cloud* | *Consensus SMPL mesh, zero calibration* |
 
-pyproject.toml	
+---
 
-    Package metadata, deps, pytest/ruff/mypy config
+## Overview
 
-scantosmpl/config.py	    
+Standard multi-view SMPL fitting tools (SMPLify-X, MultiviewSMPLifyX, EasyMocap) all require **pre-calibrated cameras in a shared coordinate frame**. Body scanners typically provide ~60 images with EXIF metadata but no extrinsic calibration.
 
-    Dataclass configs for all pipeline stages
+ScanToSMPL solves this via a three-tier pipeline:
 
-scantosmpl/types.py
+1. **Tier 1** — Per-view HMR with [CameraHMR](https://camerahmr.is.tue.mpg.de) fused into a consensus SMPL mesh. Zero calibration. ~2 min.
+2. **Tier 2** — PnP self-calibration using the SMPL mesh + 138 dense surface keypoints to recover per-view `[R|t]`, then multi-view triangulation + reprojection refinement. ~3 min.
+3. **Tier 3** — Surface refinement via differentiable chamfer distance (Kaolin) against the photogrammetry point cloud. ~5 min.
 
-	ViewType, CameraParams, ViewResult, FittingResult, SMPLOutput
+Each tier is independently shippable. Errors don't cascade — each tier improves the previous.
 
-scantosmpl/smpl/model.py
+---
 
-	SMPL wrapper with differentiable forward pass + optimisable params
-
-scantosmpl/cli.py
-
-	Click CLI skeleton (fit-images, fit-pointcloud, fit-combined)
-
-models/README.md
-
-	Download instructions for all model files
-
-tests/test_smpl_model.py
-
-	10 tests covering all Phase 0 acceptance criteria
-
-utils/clean_smpl.py
-
-	# As a module
-	python -m scantosmpl.utils.clean_smpl models/smpl/ --output models/smpl/
-
-	# Or from code
-	from scantosmpl.utils.clean_smpl import clean_smpl_pkl, clean_directory
-	clean_directory(Path("models/smpl/"))
-
-## phase 1 - keypoint detection
+## Architecture
 
 ```
-python -c "\nfrom scantosmpl.detection.pipeline import DetectionPipeline\nfrom pathlib import Path\n\npipeline = DetectionPipeline(device='cuda')\nresults = pipeline.process_directory(\n    Path('data/t-pose/jpg'),\n    debug_dir=Path('output/debug/detection'),\n)\nprint(f'\nProcessed {len(results)} images')\nfor r in results:\n    n_vis = int((r.keypoint_confs > 0.3).sum()) if r.keypoint_confs is not None else 0\n    print(f'  {r.image_path.name}: {r.view_type.value} ({n_vis}/17 kps)')\n"
+INPUT: ~60 images (EXIF-normalised) + optional point cloud (PLY/OBJ)
+           │
+           ▼
+┌─────────────────────────────────┐
+│  STAGE 0: DETECTION             │
+│  RT-DETR → person bbox          │
+│  ViTPose++ → 17 COCO keypoints  │
+│  Classify: FULL / PARTIAL / SKIP│
+│  Extract EXIF intrinsics        │
+└────────────┬────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────┐
+│  TIER 1: PER-VIEW HMR + FUSION  │
+│  CameraHMR per full-body view:  │
+│    β, θ + FoV + 138 dense kps   │
+│  Consensus: β median,           │
+│    θ SO(3) Fréchet mean         │
+│  Output: ~40-50mm PA-MPJPE      │  ◄─── Tier 1 complete (shippable)
+└────────────┬────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────┐
+│  TIER 2: SELF-CALIBRATION       │
+│  K from CameraHMR FoV / EXIF    │
+│  solvePnPRansac (138 kps) →[R|t]│
+│  Confidence-weighted DLT        │
+│  SMPL optimisation: joint +     │
+│    reprojection loss (all views) │
+│  Output: target <25mm MPJPE     │  ◄─── Tier 2 complete (shippable)
+└────────────┬────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────┐
+│  TIER 3: SURFACE REFINEMENT     │
+│  ICP: align point cloud → SMPL  │
+│  Kaolin chamfer + semantic weights│
+│  Optional SMPL+D displacements  │
+│  Output: target <8mm chamfer    │  ◄─── Tier 3 complete (shippable)
+└─────────────────────────────────┘
 ```
 
-### CameraHMR prerequisites
+---
 
-Model	Checkpoint	Output	You have?
-Main HMR	camerahmr_checkpoint_cleaned.ckpt (7.5GB)	SMPL params (β, θ) + weak-perspective camera + 44 2D keypoints	Yes
-FLNet	cam_model_cleaned.ckpt	Focal length / FoV from image	?
-DenseKP	densekp.ckpt	138 dense 3D surface keypoints	?
-The 138 dense keypoints (REVIEW.md criterion 2.3) come from a separate model, not the main CameraHMR checkpoint. And the FoV estimation (criterion 2.2) comes from FLNet, also separate.
+## Installation
 
+### Prerequisites
 
-View	Spread	Torso frac	Excluded?	Reason
-cam02_4	0.07	0.28	yes	pure side view (spread < 0.12)
-cam06_4	0.02	0.28	yes	pure side view (spread < 0.12)
-cam07_6	0.26	0.22	yes	floor-up angle (torso < 0.23)
-all others	≥ 0.17	≥ 0.23	no	—
+- Python 3.10+
+- PyTorch 2.0+ with CUDA 11.8+
+- 8GB+ GPU (RTX 3080Ti 12GB recommended)
 
-CameraHMR submodule (external/CameraHMR)
+### Setup
 
-Added as a git submodule (master branch, commit b1b6eea)
-Fixed upstream syntax error in densekp_model.py (def forward(self, batch) missing colon)
-New/modified files:
-
-File	What it does
-scantosmpl/hmr/camera_hmr.py	CameraHMRInference: loads all three models, monkey-patches SMPL_MEAN_PARAMS_FILE, shared ViT-H backbone, CLIFF camera conversion, DenseKP keypoint denormalisation
-scantosmpl/hmr/orientation.py	check_orientation_quality: upright check, rotation magnitude, T-pose arm check → score + warnings
-scantosmpl/hmr/pipeline.py	HMRPipeline: orchestrates all views, PIL wireframe overlay, JSON + summary debug output
-scantosmpl/hmr/init.py	Clean exports
-scantosmpl/config.py	HMRConfig with all checkpoint paths
-scantosmpl/types.py	CameraParams.hmr_translation added
-pyproject.toml	Added pytorch-lightning, timm, einops, yacs, loguru
-tests/test_hmr.py	8 test classes, no GPU needed
-tests/integration/test_hmr_integration.py	5 test classes covering criteria 2.1–2.7
-Run commands:
-
-
-# Install new deps first
+```bash
+git clone --recurse-submodules https://github.com/RalleyD/scan-to-smpl.git
+cd scan-to-smpl
 pip install -e ".[dev]"
+```
 
-# Unit tests (no GPU)
-pytest tests/test_hmr.py -v
+For Tier 3 surface refinement (optional):
 
-# Integration tests (GPU + checkpoints)
-pytest tests/integration/test_hmr_integration.py -v -m gpu
+```bash
+pip install -e ".[kaolin]"
+```
 
-# End-to-end debug run
-python -c "
-from pathlib import Path
-from scantosmpl.detection.pipeline import DetectionPipeline
-from scantosmpl.hmr.pipeline import HMRPipeline
-from scantosmpl.config import HMRConfig
+### Model downloads
 
-det = DetectionPipeline(device='cuda')
-views = det.process_directory(Path('data/t-pose/jpg'), debug_dir=Path('output/debug/detection'))
-hmr = HMRPipeline(HMRConfig(), device='cuda')
-views = hmr.process_views(views, Path('data/t-pose/jpg'), debug_dir=Path('output/debug/hmr'))
-"
-# Inspect output/debug/hmr/summary.txt and *_hmr_overlay.jpg
+| Model | Source | Required for |
+|-------|--------|-------------|
+| SMPL `.pkl` files | [smpl-x.is.tue.mpg.de](https://smpl-x.is.tue.mpg.de) (free registration) | All tiers |
+| CameraHMR checkpoint (`camerahmr_checkpoint_cleaned.ckpt`, 7.5GB) | [camerahmr.is.tue.mpg.de](https://camerahmr.is.tue.mpg.de) (free registration) | Tier 1 |
+| FLNet checkpoint (`cam_model_cleaned.ckpt`) | Same as above | Tier 1 FoV |
+| DenseKP checkpoint (`densekp.ckpt`) | Same as above | Tier 1 + Tier 2 PnP |
+| ViTPose++ / RT-DETR | Auto-downloaded via HuggingFace on first run | All tiers |
 
-Additionally, the model needs smpl_mean_params.npz for initialisation.
+Place SMPL files in `data/body_models/` and CameraHMR checkpoints in `models/`. See `models/README.md` for the expected directory layout.
 
-## tests
+---
 
-### Integration tests (requires scanner images + downloads models):
-pytest tests/integration/ -v
+## Quick start (TODO - See notes.md)
 
-### All tests:
-pytest tests/ --no-header -v
+```bash
+# Tier 1 only — zero calibration, images only
+scantosmpl fit-images \
+    --image-dir ./scan/images/ \
+    --reference-pose t-pose \
+    --output ./output/
 
+# Tier 1+2+3 — full pipeline with point cloud
+scantosmpl fit-combined \
+    --image-dir ./scan/images/ \
+    --pointcloud ./scan/mesh.ply \
+    --reference-pose t-pose \
+    --output ./output/
 
-# phase 3
+# Point cloud only
+scantosmpl fit-pointcloud \
+    --pointcloud ./scan/mesh.ply \
+    --gender neutral \
+    --output ./output/
+```
 
-Global orient handling
-Each view's global_orient encodes body rotation relative to that camera — they differ wildly across views (expected). For the Tier 1 consensus mesh, we need one canonical orientation. Options:
+Outputs written to `--output`:
 
-(A) Most frontal view — pick the view with the most symmetric shoulder spread (cam01_2 or cam05_6 look frontal). Use its global_orient directly. Simple, robust.
-(B) Median-view selection — cluster global_orient vectors and pick the medoid. More principled but may select a 3/4 view.
-(C) Canonical zero — set global_orient to [0,0,0] (identity). The consensus mesh faces "forward" in SMPL's canonical frame. Tier 2 PnP recovers actual per-view orientation.
+| File | Contents |
+|------|----------|
+| `consensus_mesh.obj` | SMPL mesh (6890 verts, 13776 faces) |
+| `consensus_results.json` | `betas` (10D), `body_pose` (69D), `global_orient`, per-view stats |
+| `metrics.json` | PA-MPJPE per tier, chamfer distance |
+| `debug/` | Per-view overlays, summary text |
 
-recommend (C) — it keeps the Tier 1 output clean and canonical. The per-view global_orients are preserved in the ViewResults for Tier 2. But (A) would give a more "realistic" looking mesh for debug visualization.
- Phase 4 (PnP with 138 dense keypoints) is the proper solution for recovering per-view orientation. Baking a "best guess frontal" into Tier 1 would just be noise that Tier 2 has to undo. Canonical [0,0,0] keeps the consensus clean — body_pose captures the T-pose shape, global_orient is identity, and the per-view orientations are preserved in ViewResults for Phase 4.
+---
 
- Body pose aggregation
-body_pose (69D = 23 joints × 3 axis-angle) is view-invariant in theory. For T-pose, rotations are small. Options:
+## Development
 
-(A) SO(3) Fréchet mean per joint — mathematically correct rotation averaging. Convert each joint's axis-angle → rotation matrix, iteratively compute the Fréchet mean on SO(3), convert back. Robust for any rotation magnitude.
-(B) Weighted component-wise median — simple, works well when rotations are small and consistent (as in T-pose). Much simpler to implement.
-Given your preference for high quality, I'd recommend (A) — it handles edge cases properly and the implementation is reusable for Tier 2.
+```bash
+# Unit tests (no GPU required)
+pytest tests/ -v
 
-The EXIF focal lengths come from the camera's actual lens metadata — they're physical measurements, not estimates. FLNet is a neural network predicting what EXIF already tells us. For your scanner (known Canon EOS 2000D hardware), EXIF is strictly more reliable. I'll implement it as: use EXIF focal lengths directly, report FLNet vs EXIF diff as a diagnostic (already done in Phase 2 summary), and skip computing a "consensus FoV" unless EXIF is missing. Option A is a clean fallback if you later process images without EXIF.
+# GPU integration tests
+pytest tests/integration/ -v -m gpu
 
-For viewing .obj meshes: The quickest option on Linux is MeshLab:
+# Lint
+ruff check scantosmpl/
 
-sudo apt install meshlab
-meshlab output/debug/consensus/consensus_mesh.obj
-Alternatively, for a quick Python one-liner without installing anything new:
+# Type check
+mypy scantosmpl/
+```
 
-python3 -c "import trimesh; trimesh.load('output/debug/consensus/consensus_mesh.obj').show()"
+---
 
-## some details about the SMPL OBJ output:
+## Package structure
 
-Full topology — The .obj has 6890 vertices and 13776 triangular faces (the f lines). Import into Blender/Maya and you'll see a complete watertight mesh, not a point cloud. This is SMPL's fixed template topology — every SMPL mesh has the same vertex count and face connectivity, which is what makes it so useful for animation pipelines.
+```
+scantosmpl/
+├── config.py           # Dataclass configs for all pipeline stages
+├── types.py            # ViewType, CameraParams, ViewResult, FittingResult
+├── cli.py              # Click CLI entry points
+│
+├── detection/          # Phase 1: RT-DETR + ViTPose++ + view classification
+├── hmr/                # Phase 2–3: CameraHMR inference, consensus fusion
+├── calibration/        # Phase 4: PnP solver, intrinsics from FoV/EXIF
+├── triangulation/      # Phase 5: DLT, RANSAC, weighted multi-view triangulation
+├── smpl/               # SMPL wrapper, joint map, losses, pose prior
+├── fitting/            # Coarse fit, reprojection, surface (Tier 2+3)
+├── pointcloud/         # Phase 6: PLY/OBJ I/O, ICP alignment, segmentation
+├── evaluation/         # MPJPE, PA-MPJPE, chamfer, reprojection metrics
+└── utils/              # SO(3) geometry, visualisation helpers
+```
 
-Articulable, but not directly via the .obj — The .obj is a "baked" static mesh (the T-pose result after applying our consensus betas + body_pose). It has no rig, joints, or blend shapes embedded in it. To articulate it in Maya/Blender you'd need to either:
+---
 
-Export as FBX with a skeleton — SMPL defines a 24-joint kinematic tree. Libraries like smplx can produce the joint positions, and tools like SMPL-to-FBX or Meshcapade's Blender add-on can export a rigged FBX with the SMPL skeleton + skinning weights built in.
+## Technology choices
 
-Load the parameters (betas + body_pose) into a SMPL plugin — The Meshcapade Blender add-on lets you dial betas and pose directly. You'd import our consensus betas (10 floats) and body_pose (69 floats from consensus_results.json) and get a fully posable character.
+| Component | Choice | Reason |
+|-----------|--------|--------|
+| **Primary HMR** | CameraHMR | Full perspective camera model, FoV prediction (5–7° error), 138 dense surface keypoints for robust PnP |
+| **Fallback HMR** | PromptHMR | 36.6mm PA-MPJPE on 3DPW; weights on Google Drive, no registration |
+| **Person detection** | RT-DETR (HuggingFace) | Native `transformers` — no detectron2 |
+| **2D keypoints** | ViTPose++-Base (HuggingFace) | 100M params, 4GB VRAM, stable in transformers ≥5.1.0 |
+| **PnP** | OpenCV `solvePnPRansac` | 138 dense kps >> 12 sparse joints for RANSAC robustness |
+| **Chamfer distance** | NVIDIA Kaolin | Apache 2.0, pip-installable, PyTorch 2.1–2.8, GPU-optimised |
+| **Body model** | smplx ≥ 0.1.28 | Official PyTorch SMPL/SMPL-X implementation |
 
-The shape information (betas) is what captures this specific person's body proportions — height, shoulder width, hip ratio, etc. The body_pose (23 joint rotations) captures the T-pose articulation. Both are in output/debug/consensus/consensus_results.json if your mentor wants to load them into a DCC tool.
+**Explicitly avoided**: HMR2.0 (unmaintained, detectron2 hell, GPU leak), PyTorch3D (no PyTorch 2.5+ support), MUC (PyTorch 1.12 + deprecated mmcv).
 
-See todos below...
+---
 
-the next phase: Perspective-n-Point — given n known 3D points and their corresponding 2D projections in an image, solve for the camera's pose (rotation + translation).
+## Implementation status
 
-in sequence:
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Scaffolding — SMPL model, config, CLI skeleton | ✅ |
+| 1 | Detection — RT-DETR + ViTPose++ + view classification | ✅ |
+| 2 | Per-view HMR — CameraHMR integration | ✅ |
+| **3** | **Multi-view consensus — Tier 1 complete** | ✅ |
+| 4 | PnP self-calibration | 🔲 |
+| **5** | **Triangulation + SMPL refinement — Tier 2** | 🔲 |
+| 6 | Point cloud preprocessing + ICP alignment | 🔲 |
+| **7** | **Surface refinement — Tier 3** | 🔲 |
+| 8 | End-to-end pipeline + CLI | 🔲 |
+| 9 | Packaging + CI | 🔲 |
 
-Triangulated 3D points are used directly first — fit SMPL joints to match the triangulated 3D keypoint positions in 3D space. This is the coarse alignment: "move the SMPL skeleton so its joints match these known 3D positions." Fast, strong constraint.
+See [REVIEW.md](REVIEW.md) for full acceptance criteria per phase.
 
-Then reprojection refinement on top — once coarsely aligned, fine-tune by projecting back into all 2D views. This catches things triangulation misses: a triangulated point computed from 3 views might be slightly off, but the reprojection loss uses all views (including ones where that keypoint wasn't confident enough for triangulation) to pull it into better alignment.
+---
 
-So triangulation gives the initialisation target, reprojection gives the final polish. The REVIEW.md criterion 5.3 (MPJPE < 25mm) is measured against the triangulated points; criterion 5.4 ensures the reprojection loss uses all views including partial ones.
+## License
 
-Triangulation (Phase 5, Step 2c): Now that we know where every camera was [R|t], we can combine the 2D keypoint observations from multiple views to compute precise 3D point positions. A keypoint seen in 3 views gives 3 "rays" from 3 known camera positions — where those rays intersect is the triangulated 3D point. More views = more accuracy. This gives us refined 3D keypoints that are better than any single view's estimate.
+MIT — see [LICENSE](LICENSE).
 
-Reprojection optimisation (Phase 5, Step 2d): We adjust the SMPL parameters (betas, body_pose, translation) so that when you project the SMPL joints back into each image using that view's [R|t] + K, the projected points land on top of the detected 2D keypoints. The loss is literally "how many pixels off are my projected SMPL joints from where ViTPose/DenseKP says they should be?"
-
-The power is that this uses all views simultaneously — including the partial/side views we excluded from HMR. A wrist that's occluded in one view is visible in three others. The optimiser finds the single SMPL configuration that best explains all observations across all cameras at once, which is a much stronger constraint than any single-view estimate.
-
-PnP self-calibration recovers the camera extrinsics [R|t] for each view — where each camera was in 3D space relative to the subject.
-
-Right now after Tier 1, we have:
-
-A good consensus SMPL mesh (the 3D shape)
-138 dense 2D keypoints per view (where surface points appear in each image)
-But no idea where the cameras were — each view's SMPL estimate lives in its own camera coordinate frame
-Phase 4 uses the SMPL mesh as a calibration target. For each view:
-
-3D points: known vertex positions on the consensus SMPL mesh (138 dense keypoints map to specific SMPL vertices)
-2D points: where DenseKP detected those same points in the image
-solvePnPRansac: given these 2D-3D correspondences + the intrinsic matrix K, recover the camera's rotation and translation [R|t]
-Once you have [R|t] per view, you can:
-
-Triangulate — combine observations from multiple views to refine 3D joint/keypoint positions (Phase 5)
-Reproject — project the SMPL mesh into all views (including the partial/side views we excluded from HMR) and optimise against all 17 images simultaneously
-This is what drops MPJPE from ~40mm (Tier 1) toward <25mm (Tier 2)
-The key insight is that 138 correspondences per view makes PnP extremely robust — RANSAC has massive redundancy compared to the 12 sparse COCO joints that traditional approaches use.
-
-# Unit tests (no GPU, fast)
-pytest tests/test_consensus.py -v
-
-# Integration tests (GPU + Phase 2 output required)
-pytest tests/integration/test_consensus_integration.py -v -m gpu
-
-
-## TODOs
-
-- remove smplx submodule - no longer needed for chumpy cleaning
-- add an FBX export or blender-compatible format for a manipulatable SMPL with a skeleton 
+**Note**: SMPL model files are non-commercial (Max-Planck-Innovation). For commercial use contact [Meshcapade](https://meshcapade.com).
