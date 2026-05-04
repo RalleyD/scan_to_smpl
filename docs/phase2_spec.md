@@ -544,5 +544,4 @@ print('Done. Check output/debug/hmr/summary.txt')
 | smpl_mean_params.npz shape mismatch | Low | File is present (1.3KB), validate shapes on load |
 | FLNet input size mismatch | Low | Resize full image to 256×256 (HRNet-48 uses AdaptiveAvgPool — size-agnostic) |
 | cam05_5 (PARTIAL) produces poor SMPL | Low | HMR handles partial crops; orientation quality check will flag if bad |
-| Dual model OOM (CameraHMR + DenseKP) | Medium | Share ViT backbone in memory; fallback: sequential load/unload |
-| DenseKP checkpoint key mismatch | Low | load_from_checkpoint handles; log missing/unexpected keys |
+| 7.5GB checkpoint OOM on load | Low | RTX 3080Ti has 12GB; checkpoint loads to CPU first then `.to(device)` |
