@@ -3,6 +3,8 @@
 
 **Calibration-free SMPL registration from multi-view images and photogrammetry point clouds.**
 
+Inspired by the potential of ML-driven insights to 3D rendering: [DesignRush Blog](https://news.designrush.com/3d-rendering-insights-rdc-design-group-interview)
+
 Fits a parametric SMPL body mesh to ~60 uncalibrated scanner images — no camera extrinsics required. Camera geometry is self-recovered using the body mesh as a calibration target.
 
 ![CameraHMR](https://img.shields.io/badge/HMR-CameraHMR-blue)
