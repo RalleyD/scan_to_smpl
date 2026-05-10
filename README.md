@@ -15,7 +15,7 @@ Fits a parametric SMPL body mesh to ~60 uncalibrated scanner images — no camer
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c)
 ![CUDA](https://img.shields.io/badge/CUDA-11.8%2B-76b900)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+![License](https://img.shields.io/badge/License-Apache_2.0-blue)
 
 ---
 
@@ -235,6 +235,6 @@ See [REVIEW.md](REVIEW.md) for full acceptance criteria per phase.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE). Copyright 2026 Dan Ralley.
 
-**Note**: SMPL model files are non-commercial (Max-Planck-Innovation). For commercial use contact [Meshcapade](https://meshcapade.com).
+**Note on upstream model licenses**: The SMPL/SMPL-X body model files (`.pkl`) are subject to a non-commercial research license from Max-Planck-Innovation. CameraHMR weights are similarly research-only. This code is Apache 2.0, but using it end-to-end requires compliance with those upstream licenses. For commercial use of the body models, contact [Meshcapade](https://meshcapade.com).
