@@ -237,9 +237,90 @@ It solves SfM from feature matching, which works best with textured scenes, not 
 It would add a hard dependency on having a successful Meshroom reconstruction
 The better path is what you already intuited: Phase 5 triangulation + joint refinement tightens the [R|t] iteratively. The Meshroom point cloud belongs in Tier 3 (surface refinement), where it gets aligned TO the SMPL mesh — not the other way around.
 
+From the Phase 4 results, the cameras are ~1.5m from the subject (radial_mean = 1.5m). The EXIF focal length is ~6349px. So:
+
+32mm / 1500mm * 6349px ≈ 135px
+
+That's the worst case — where PnP can't absorb any of the error. In practice, PnP finds the best rigid transform which absorbs some of the systematic offset, bringing it down to the ~52px we actually observe.
+
+The remaining 52px is the non-rigid error — differences in arm angle, torso twist, etc. between the consensus pose and what's actually visible in each image. A rigid camera transform can't fix those; only refining the SMPL mesh itself (Phase 5) can.
+
 The current pipeline order is sound: EXIF K (reliable) → sparse PnP (coarse [R|t]) → triangulate + refine (tighten [R|t] and SMPL together).
 
+Camera Centers Comparison (17 common views)
+==========================================================================================
+View                 PnP Center (X,Y,Z)                   COLMAP Center (X,Y,Z)               
+------------------------------------------------------------------------------------------
+cam01_2.JPG          ( -0.851,   0.419,   1.888)   (  0.890,   3.060,  -1.268)
+cam01_6.JPG          ( -1.117,  -1.061,   1.208)   (  2.990,   1.958,   0.087)
+cam02_4.JPG          (  1.265,  -2.708,   0.360)   ( -1.441,   1.893,   1.612)
+cam02_5.JPG          ( -1.764,   0.134,   0.091)   (  0.799,   1.979,   2.469)
+cam03_5.JPG          ( -0.974,  -0.162,  -1.667)   (  0.175,  -0.131,   3.580)
+cam03_6.JPG          ( -1.084,  -1.030,  -1.189)   (  2.380,  -0.538,   3.246)
+cam04_4.JPG          ( -0.209,   1.368,   1.730)   ( -2.446,  -1.478,   2.465)
+cam04_5.JPG          (  0.053,  -1.118,  -1.064)   ( -0.233,  -2.480,   2.686)
+cam05_4.JPG          (  1.215,   1.167,  -1.224)   ( -2.225,  -2.790,   0.394)
+cam05_5.JPG          (  1.212,  -0.102,  -1.338)   ( -0.487,  -3.448,   0.507)
+cam05_6.JPG          (  0.852,  -1.283,  -0.859)   (  1.884,  -3.363,   0.681)
+cam06_4.JPG          (  0.967,   1.227,   0.023)   ( -1.981,  -1.446,  -1.202)
+cam07_4.JPG          (  1.036,   1.183,   1.341)   ( -1.531,   0.076,  -2.816)
+cam07_6.JPG          (  0.889,  -1.254,   1.152)   (  2.577,  -0.579,  -2.405)
+cam10_2.JPG          ( -0.574,   1.416,   1.167)   ( -1.860,   2.481,  -0.677)
+cam10_4.JPG          (  0.337,   1.465,   0.984)   ( -2.541,  -0.366,   2.274)
+cam10_5.JPG          ( -0.579,   1.428,   1.017)   ( -2.841,  -1.787,   1.116)
+
+Good agreement (within ~15°) — ~10 views:
+cam07_6 (4.7°), cam07_4 (3.4°), cam04_5 (1.7°), cam05_6 (7.0°), cam03_6 (7.6°), cam01_2 (11.2°), cam10_2 (13.3°), cam01_6 (14.7°), cam02_5 (15.2°), cam05_5 (16.9°)
+
+Completely flipped (~130-164°) — 4 views:
+cam02_4, cam04_4, cam10_4, cam10_5 — these are placed on the OPPOSITE side of the subject from where COLMAP says they are.
+
+Medium error (~25-30°) — 3 views:
+cam03_5, cam05_4, cam06_4
+
+The flipped views are telling — cam02_4 is a side view, cam10_4 and cam10_5 are rear views. These are exactly the views where ViTPose hallucinates face keypoints on the back of the head, giving the PnP solver mirrored correspondences. It "solves" PnP but places the camera on the wrong side.
+
+The positive takeaway: ~10/17 views have camera poses that agree with COLMAP within 15°, using nothing but a coarse SMPL mesh and ViTPose joints. That's a strong foundation for Phase 5 triangulation — we can use those ~10 reliable views and discard or down-weight the flipped ones.
+
+For Phase 5, we could add a consistency check: if a camera center is on the opposite side of the subject from where reprojection of its own keypoints would suggest, flag it. Or simply use the COLMAP extrinsics as ground truth for the views where they're available — you have 60 calibrated views from COLMAP, which is a much richer source than self-calibration.
+
+Use COLMAP extrinsics when available. The complexity is low and the gain is substantial.
+
+Why the complexity is low:
+
+We just read COLMAP's images.bin in ~30 lines of Python — it's a simple binary format
+You already have Procrustes alignment implemented (geometry.py)
+The only new work is: read COLMAP cameras → Procrustes align to SMPL frame → done
+Maybe 50-100 lines of code total (a colmap_reader.py utility)
+Why the gain is high:
+
+60 calibrated views instead of 17
+No flipped cameras (4/17 of our self-calibrated views are ~180° wrong)
+Sub-pixel accurate extrinsics vs ~52px reprojection error
+Better triangulation → better SMPL refinement → the whole downstream pipeline improves
+The architecture already supports this. CLAUDE.md defines --calibration ./calibration.json and --skip-self-calibration CLI flags. Self-calibration was designed for when you DON'T have extrinsics. You do have them — use them.
+
+The practical design for Phase 5: try COLMAP extrinsics first, fall back to self-calibrated PnP if COLMAP isn't available. Phase 4's self-calibration isn't wasted — it validated that the approach works and gave us the cross-check we just ran, and it remains the fallback path for scans without SfM reconstruction.
+
 Optional: re-run PnP with refined Tier 2 SMPL → re-triangulate → re-optimise (bundle adjustment).
+
+
+---
+
+## Glossary
+
+PA-MPJPE (Procrustes-Aligned Mean Per-Joint Position Error)
+
+This is from Phase 3. For each view, we compare that view's SMPL joints (24 joints) against the consensus SMPL joints. Before measuring the error, Procrustes alignment removes any rotation, translation, and scale difference — so the 32mm measures pure shape/pose disagreement, not camera angle differences.
+
+32mm means: on average, each joint is 32mm away from where the consensus says it should be, after optimally aligning the two skeletons.
+
+The reprojection error calculation
+
+The question is: if a joint is 32mm off in 3D, how many pixels off will it appear in the image?
+
+
+projected_error = (3D_error / distance_to_camera) * focal_length
 
 ---
 
