@@ -305,6 +305,11 @@ The practical design for Phase 5: try COLMAP extrinsics first, fall back to self
 Optional: re-run PnP with refined Tier 2 SMPL → re-triangulate → re-optimise (bundle adjustment).
 
 
+## Phase 5
+
+TODO - spec ready
+
+
 ---
 
 ## Glossary
