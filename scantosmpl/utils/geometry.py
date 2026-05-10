@@ -194,6 +194,55 @@ def procrustes_align(
     return aligned, scale
 
 
+# ---------------------------------------------------------------------------
+# Projection utilities
+# ---------------------------------------------------------------------------
+
+
+def project_points(
+    pts_3d: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    K: np.ndarray,
+) -> np.ndarray:
+    """
+    Project 3D world points to 2D image coordinates.
+
+    Args:
+        pts_3d: (N, 3) points in world coordinates.
+        R: (3, 3) camera rotation matrix (world-to-camera).
+        t: (3,) camera translation vector.
+        K: (3, 3) intrinsic matrix.
+
+    Returns:
+        (N, 2) projected 2D image coordinates.
+    """
+    # Transform to camera frame: P_cam = R @ P_world + t
+    pts_cam = (R @ pts_3d.T).T + t  # (N, 3)
+
+    # Perspective divide + intrinsic projection
+    pts_2d_h = (K @ pts_cam.T).T  # (N, 3)
+    pts_2d = pts_2d_h[:, :2] / pts_2d_h[:, 2:3]  # (N, 2)
+
+    return pts_2d
+
+
+def camera_center(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """
+    Camera position in world coordinates.
+
+    C = -R^T @ t
+
+    Args:
+        R: (3, 3) camera rotation matrix (world-to-camera).
+        t: (3,) camera translation vector.
+
+    Returns:
+        (3,) camera center in world coordinates.
+    """
+    return -R.T @ t
+
+
 def compute_pa_mpjpe(
     predicted: np.ndarray,
     target: np.ndarray,

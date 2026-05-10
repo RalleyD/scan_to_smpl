@@ -179,6 +179,66 @@ Tier 1 mesh has ~40mm error, so PnP `[R|t]` estimates are approximate. Three mit
 2. **2D observations are the true anchor** — ViTPose/DenseKP detections don't depend on SMPL quality
 3. **Reprojection is self-correcting** — the final loss is purely 2D; it iteratively adjusts until projections match
 
+### Prerequisites
+
+`downsample_mat.pkl` maps the dense 138 keypoints to SMPL vertices - The matrix is one-hot — each of the 138 keypoints maps to exactly one SMPL vertex. This means we can extract 138 vertex indices directly, which simplifies everything.
+
+This comes from `tran-eval-utils` from 
+
+[CameraHMR](camerahmr.is.tue.mpg.de)
+
+### A/B comparison
+
+The A/B comparison (Step 3, criterion 4.6) answers: "Do the 138 dense keypoints actually give better PnP results than the 12 sparse COCO joints?"
+
+For the 10 dense views, we run PnP twice:
+
+Dense: using all 138 surface keypoints (the normal path)
+Sparse: using only the 12 COCO joint correspondences (same method we use for excluded views)
+Then compare reprojection errors side-by-side on the same views.
+
+What it solves: It validates our core design assumption — that CameraHMR's 138 dense keypoints provide meaningfully better camera pose recovery than sparse joints alone. If dense doesn't outperform sparse, it would mean either:
+
+The dense keypoints are too noisy to help (questioning their value)
+12 well-localised joints are sufficient (simplifying the pipeline)
+In practice we expect dense to win clearly — 138 points spread across the body surface give RANSAC far more redundancy and geometric coverage than 12 joint locations. But we should prove it rather than assume it, since the entire rationale for using CameraHMR's dense keypoints in PnP (rather than just ViTPose joints) rests on this being true.
+
+It's a one-time validation step, not something that changes the output — it just gives us confidence (or a warning) about the approach.
+
+### denseKP failure - multi-view estimation
+
+The 138 dense keypoints failed for PnP (surface vertices are too sensitive to pose averaging), but they still have value in Phase 5. Once we have refined camera poses and a better SMPL mesh, the dense keypoints become useful as reprojection targets — 138 points per view gives much richer loss signal than 12 sparse joints when optimizing SMPL params. They're bad as PnP input but good as optimization supervision.
+
+PnP is absolutely the correct method — "given known 3D points and their 2D projections, find camera pose" is exactly our problem. The issue isn't PnP, it's the quality of our 3D calibration target. The consensus mesh has ~32mm error, which projects to ~50px — and that's exactly what we see (52px mean).
+
+There's a chicken-and-egg situation:
+
+- PnP needs good 3D points → but our best 3D points come from a coarse consensus
+- Triangulation needs camera poses → but we need PnP to get those
+  
+The standard solution is exactly what we're doing: coarse-to-fine. Phase 4 gives initial [R|t] (coarse). Phase 5 uses those poses to triangulate, then jointly refines SMPL params AND camera poses in a loop. The 52px reprojection will tighten significantly in Phase 5 because the SMPL mesh gets optimized to explain ALL views simultaneously, not just averaged in parameter space.
+
+The Phase 4 results are actually very encouraging — the camera geometry is physically plausible (1.5m distance, 309° coverage, multi-height tiers). That's strong evidence the camera poses are approximately correct, even if the reprojection error is high.
+
+For PnP itself, sparse COCO joints are the right choice. The results confirm this (all 17 views solved via sparse).
+
+- Sparse PnP actually works — it finds camera poses on all 7 sparse views AND all 10 dense views (A/B comparison shows 37-70px reprojection). The quality gate (30px) rejects them.
+- Dense PnP gets only 10-15 inliers out of 138 even at 105px threshold — the dense 3D-2D correspondences have a fundamental quality issue (the consensus mesh's averaged body_pose causes vertex-level errors much larger than joint-level errors).
+- Sparse uses well-localized joints (stable), dense uses surface vertices (sensitive to pose averaging).
+
+Risk of coarse K for triangulation? Use Meshroom instead?
+
+The K matrix (EXIF focal length) is actually our most reliable input — it's a physical measurement from the Canon EOS 2000D hardware, cross-validated by FLNet (mean diff 4.17°). K isn't coarse; it's the [R|t] that's coarse (~52px reprojection).
+
+Meshroom extrinsics are an interesting idea but have practical issues:
+
+Meshroom's coordinate system is arbitrary (scale, orientation, origin) — you'd need to align it to SMPL space anyway
+It solves SfM from feature matching, which works best with textured scenes, not a person standing still
+It would add a hard dependency on having a successful Meshroom reconstruction
+The better path is what you already intuited: Phase 5 triangulation + joint refinement tightens the [R|t] iteratively. The Meshroom point cloud belongs in Tier 3 (surface refinement), where it gets aligned TO the SMPL mesh — not the other way around.
+
+The current pipeline order is sound: EXIF K (reliable) → sparse PnP (coarse [R|t]) → triangulate + refine (tighten [R|t] and SMPL together).
+
 Optional: re-run PnP with refined Tier 2 SMPL → re-triangulate → re-optimise (bundle adjustment).
 
 ---

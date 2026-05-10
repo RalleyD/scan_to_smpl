@@ -70,9 +70,17 @@ class CalibrationConfig:
     """Self-calibration configuration."""
 
     pnp_method: str = "SOLVEPNP_ITERATIVE"
-    ransac_threshold: float = 8.0  # pixels
-    min_inliers: int = 20
+    ransac_threshold: float = 105.0  # pixels — generous for consensus mesh error (~32mm PA-MPJPE)
+    ransac_iterations: int = 5000
+    min_inliers: int = 20          # dense views
+    min_inliers_sparse: int = 6    # sparse views
     use_dense_keypoints: bool = True  # 138 CameraHMR surface keypoints
+    dense_conf_threshold: float = 0.3
+    sparse_conf_threshold: float = 0.3
+    refine_lm: bool = True
+    max_reprojection_error: float = 80.0  # px — quality gate (consensus mesh ~32mm error → ~50px projected)
+    save_debug: bool = True
+    debug_dir: Path = Path("output/debug/calibration")
 
 
 @dataclass
