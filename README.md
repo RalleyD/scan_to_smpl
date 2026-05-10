@@ -222,7 +222,7 @@ scantosmpl/
 | 1 | Detection — RT-DETR + ViTPose++ + view classification | ✅ |
 | 2 | Per-view HMR — CameraHMR integration | ✅ |
 | **3** | **Multi-view consensus — Tier 1 complete** | ✅ |
-| 4 | PnP self-calibration | 🔲 |
+| 4 | PnP self-calibration | ✅ |
 | **5** | **Triangulation + SMPL refinement — Tier 2** | 🔲 |
 | 6 | Point cloud preprocessing + ICP alignment | 🔲 |
 | **7** | **Surface refinement — Tier 3** | 🔲 |
