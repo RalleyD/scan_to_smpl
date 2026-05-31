@@ -107,26 +107,34 @@ Not all observations are reliable (occluded joints, rear-view hallucinations).
 by its ViTPose confidence score. Higher-confidence detections have more influence on the
 triangulated 3D position.
 
-### 5. SMPL optimisation: staged, consensus-initialised
+### 5. SMPL optimisation: staged, consensus-initialised, reprojection-dominant
 
-Initialise from Phase 3 consensus parameters. Optimise in stages to avoid local minima:
+Initialise from Phase 3 consensus parameters. Optimise in stages with loss-weight annealing
+so reprojection (using all 17 views directly) dominates by the final stage.
 
 **Stage 1 — Global alignment (50 iterations)**:
 - Optimise: global_orient, translation, scale
-- Loss: L_joint (triangulated 3D joints)
-- Purpose: Align the consensus mesh to the triangulated skeleton
+- Loss: L_joint (triangulated 3D joints) — fast, coarse alignment
+- Purpose: Get the mesh roughly positioned in the right place
 
 **Stage 2 — Shape refinement (100 iterations)**:
 - Optimise: betas, global_orient, translation, scale
-- Loss: L_joint + L_reproj + L_shape_reg
-- Purpose: Adjust body shape to match multi-view observations
+- Loss: 0.5·L_joint + 1.0·L_reproj + L_shape_reg
+- Purpose: Adjust body shape using 2D observations (reprojection) as primary signal
 
 **Stage 3 — Full refinement (200 iterations)**:
 - Optimise: betas, body_pose, global_orient, translation, scale
-- Loss: L_joint + L_reproj + L_pose_prior + L_shape_reg
-- Purpose: Fine-tune pose and shape together
+- Loss: 0.1·L_joint + 1.0·L_reproj + L_pose_prior + L_shape_reg
+- Purpose: Fine-tune pose and shape, primarily against 2D ViTPose observations.
+  Triangulation acts only as a weak anchor to prevent drift.
 
-### 6. Loss functions
+**Why this answers DLT error accumulation**: DLT triangulation noise affects L_joint, but
+its weight drops 10x by Stage 3. The dominant signal is L_reproj — the actual 2D ViTPose
+observations across all 17 views. Even if triangulated joints are biased, the SMPL fit
+converges to what the 2D evidence supports, constrained by the body model's anatomical prior.
+The consensus mesh init (PA-MPJPE ~32mm) keeps us out of bad local minima from the start.
+
+### 6. Loss functions (robust to outliers)
 
 ```
 L_total = w_joint * L_joint
@@ -134,17 +142,27 @@ L_total = w_joint * L_joint
         + w_pose_prior * L_pose_prior
         + w_shape_reg * L_shape_reg
 
-L_joint = mean(||J_smpl - J_triang||²)             # 3D joint position error
-L_reproj = mean(||proj(J_smpl, R_i, t_i, K_i) - kp2d_i||² * conf_i)  # 2D reprojection
-L_pose_prior = ||body_pose||²                        # regularise toward neutral pose
-L_shape_reg = ||betas||²                             # regularise toward mean shape
+L_joint = mean(huber(||J_smpl - J_triang||, delta=0.05))       # Huber on 3D joint error (m)
+L_reproj = mean(huber(||proj(J_smpl, R_i, t_i, K_i) - kp2d_i||, delta=20) * conf_i)
+L_pose_prior = ||body_pose||²                                   # regularise toward neutral pose
+L_shape_reg = ||betas||²                                        # regularise toward mean shape
 ```
 
-Weights from `FittingConfig`: w_joint=1.0, w_reproj=0.5, w_pose_prior=0.01, w_shape_reg=0.01.
+**Huber loss** (instead of squared L2) makes the optimisation robust to outlier observations.
+A single bad triangulated joint or hallucinated ViTPose keypoint contributes linearly, not
+quadratically, so it can't dominate the gradient. Thresholds chosen so noise stays in the
+quadratic regime (≤50mm for 3D, ≤20px for 2D) and outliers in the linear regime.
 
-**Reprojection loss**: For each view with COLMAP extrinsics, project SMPL joints through
-the (aligned) camera and compare to undistorted ViTPose keypoints, weighted by confidence.
-This uses all 17 views simultaneously — more observations than triangulation alone.
+**Reprojection loss**: For each view with extrinsics, project SMPL joints through the
+(aligned) camera and compare to undistorted ViTPose keypoints, weighted by confidence.
+This uses all 17 views simultaneously — far more constraint than triangulation alone.
+
+**Why this is different from prior DLT failures**: The user has seen DLT triangulation
+fail catastrophically before (with COLMAP + MediaPipe). Three things make this pipeline
+fundamentally different:
+1. **SMPL is a strong prior** — 79 DOF + anatomical constraints, vs 42 DOF unconstrained
+2. **Reprojection dominates** by Stage 3 — triangulation is just an init signal
+3. **Huber loss + confidence weighting** prevents single outliers from poisoning the fit
 
 ---
 
@@ -389,12 +407,12 @@ class TestSMPLOptimiser:
 
 ```python
 class TestPhase5COLMAP:
-    def test_colmap_reader()                 # 5.1: reads 60 images, 2 cameras
-    def test_frame_alignment_quality()       # 5.2: reproj < 15px after alignment
-    def test_triangulation_accuracy()        # 5.3: PA-MPJPE < 30mm (vs consensus)
-    def test_smpl_refinement()               # 5.4: PA-MPJPE improves over consensus
-    def test_reprojection_error()            # 5.5: mean reproj < 15px
-    def test_debug_output()                  # 5.6: JSON, summary, plots created
+    def test_all_17_views_have_colmap_extrinsics()  # 5.1: 17/17 found in COLMAP
+    def test_frame_alignment_quality()              # 5.2: reproj < 15px after alignment
+    def test_triangulation_accuracy()               # 5.3: PA-MPJPE < 30mm (vs consensus)
+    def test_smpl_refinement_improves()             # 5.4: PA-MPJPE improves over consensus
+    def test_reprojection_error()                   # 5.5: mean reproj < 15px
+    def test_debug_output()                         # 5.6: JSON, summary, plots created
 ```
 
 ---
@@ -481,7 +499,7 @@ as a stub that passes tests with relaxed thresholds.
 
 | # | Criterion | Target (COLMAP) | Target (self-cal) | Verification |
 |---|-----------|----------------|-------------------|-------------|
-| 5.1 | COLMAP reader parses model 0 | 60 images, 2 cameras | N/A | Unit test |
+| 5.1 | All 17 Phase 1 views have COLMAP extrinsics | 17/17 found in images.bin with valid camera | N/A | Set intersection of view names; assert camera_id resolves to a valid ColmapCamera |
 | 5.2 | Frame alignment reproj error | < 15px mean | N/A | Mean reproj of consensus joints through aligned cameras |
 | 5.3 | Triangulation accuracy | PA-MPJPE < 30mm vs consensus | < 50mm | Compare triangulated joints to consensus joints |
 | 5.4 | SMPL refinement improves over consensus | PA-MPJPE decreases | PA-MPJPE decreases | Before/after comparison |
@@ -572,8 +590,10 @@ pytest tests/integration/test_phase5_integration.py -v -m gpu
 
 | Risk | Likelihood | Mitigation |
 |------|-----------|------------|
+| DLT triangulation error accumulates across views | Medium (user has observed this in past) | (1) SMPL body model acts as strong anatomical prior (79 DOF vs 42 DOF unconstrained). (2) L_joint weight decays across stages (1.0 → 0.5 → 0.1), so reprojection dominates final refinement. (3) Huber loss makes optimisation robust to single outlier joints. (4) RANSAC triangulation rejects per-view outliers before they enter L_joint. |
 | COLMAP frame very different from SMPL canonical | Low | Procrustes handles arbitrary scale/rotation/translation. Use at least 8 well-distributed joints for robust alignment. |
-| ViTPose hallucinates keypoints on rear views | Medium (known from Phase 4) | RANSAC triangulation rejects outlier observations. Confidence weighting reduces influence. 4 known problem views: cam02_4, cam04_4, cam10_4, cam10_5. |
-| Consensus mesh too coarse for meaningful refinement | Low | 32mm PA-MPJPE is good enough as initialisation. Triangulation provides independent 3D signal. |
-| Overfitting body_pose in Stage 3 | Medium | Pose prior regularisation + conservative learning rate. Monitor per-stage PA-MPJPE. |
+| ViTPose hallucinates keypoints on rear views | Medium (known from Phase 4) | RANSAC triangulation rejects outlier observations. Confidence weighting reduces influence. Huber reprojection loss caps gradient from any single bad keypoint. 4 known problem views: cam02_4, cam04_4, cam10_4, cam10_5. |
+| Consensus mesh too coarse for meaningful refinement | Low | 32mm PA-MPJPE is good enough as initialisation. Reprojection loss across 17 views provides independent signal. |
+| Overfitting body_pose in Stage 3 | Medium | Pose prior regularisation + conservative learning rate. Monitor per-stage PA-MPJPE — abort stage if it degrades. |
 | Frame alignment error propagates to triangulation | Low | Validate alignment via reprojection of consensus joints through aligned cameras (criterion 5.2). |
+| Some Phase 1 views missing from COLMAP | Low | Criterion 5.1 verifies all 17 present. If missing, log clearly and fall back to subset. |
