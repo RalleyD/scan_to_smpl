@@ -115,6 +115,27 @@ class FittingConfig:
 
 
 @dataclass
+class Phase5Config:
+    """Phase 5: Multi-view triangulation + SMPL refinement configuration."""
+
+    extrinsics_source: Literal["colmap", "self_calibration"] = "colmap"
+    colmap_model_dir: Path | None = None
+
+    # Triangulation
+    triangulation_conf_threshold: float = 0.3   # min ViTPose confidence to include a view
+    triangulation_min_views: int = 3             # min views required per joint
+    ransac_reproj_threshold: float = 100.0       # px — RANSAC inlier threshold (ViTPose noise ~50px on 6000px images)
+    ransac_iterations: int = 100
+
+    # Frame alignment
+    min_alignment_joints: int = 4               # min joints required for Procrustes
+
+    # Debug
+    save_debug: bool = True
+    debug_dir: Path = Path("output/debug/refinement")
+
+
+@dataclass
 class PipelineConfig:
     """Top-level pipeline configuration."""
 
@@ -137,6 +158,7 @@ class PipelineConfig:
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     fitting: FittingConfig = field(default_factory=FittingConfig)
+    phase5: Phase5Config = field(default_factory=Phase5Config)
 
     # Device
     device: str = "cuda"

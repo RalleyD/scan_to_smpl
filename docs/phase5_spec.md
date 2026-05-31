@@ -478,6 +478,9 @@ Step 7: Debug output
   - reprojection_overlay/ — per-view images with projected joints
 ```
 
+Overlay colors: 🟢 Green = projected refined SMPL joints; 🟠 Orange = ViTPose detections.
+
+
 ---
 
 ## Self-Calibration Fallback
