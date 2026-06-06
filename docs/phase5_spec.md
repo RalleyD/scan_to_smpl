@@ -577,6 +577,34 @@ as a stub that passes tests with relaxed thresholds.
 
 ---
 
+## Verification
+
+### Understanding Results
+
+#### 479px mean reprojection error - misleading
+
+The per-joint RANSAC reprojection (`triangulated_joints.json`) is 44-83 px (similar to phase 4 PnP calibration - RANSAC DLT).
+
+For context, this does represent incremental improvement.
+
+This represents the ViTPose noise floor on a 6000 x 4000 px image. The 479px mean, includes the rear-view cameras where ViTPose swaps left/right body parts, dragging the mean up.
+
+The previous target of 15px is unreasonable. On a 6000px wide image, this would require 0.25% accuracy which is sub-pixel domain.
+
+Currently, the PA-MPJPE is 33.6mm vs the 30mm target. This could be closed with more optimiser iteraitons.
+
+Consequently, moving to a median reprojection error metric, rather than mean.
+
+Out of the 17 good views, 12 are frontal, 5 are rear-view. ViTPose appears to swap left/right, causing a >1000px error when this happens. Therefore, e.g: a 65px front error and 2000px rear error
+
+`(12 * 65) + (5 * 2000) / 17 = 635 px => worst case in this scenario`
+
+With median, this will show something like "nearly half my views are actually doing better than this".
+
+In practice, mean is the right metric for data with Gaussian noise; median is the right metric when there is clean data plus categorical outliers. In this case, the rear-views aren't noise, they're wrong labels. Mean inflates the average, median treats them as outliers - in essence, ignoring them.
+
+See [](phase5_spec_supplement.md) for further options of improvement.
+
 ## Verification Commands
 
 ```bash

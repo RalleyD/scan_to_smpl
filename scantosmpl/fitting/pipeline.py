@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,11 +38,15 @@ class Phase5Result:
     """Output from the Phase 5 pipeline."""
 
     refined: RefinementResult
-    triangulated_joints: np.ndarray         # (J, 3) raw triangulated, ordered by joint_indices
-    triangulated_joints_smpl: np.ndarray    # (24, 3) mapped to SMPL joint ordering (zeros for unmapped)
+    # (J, 3) raw triangulated, ordered by joint_indices
+    triangulated_joints: np.ndarray
+    # (24, 3) mapped to SMPL joint ordering (zeros for unmapped)
+    triangulated_joints_smpl: np.ndarray
     triangulation_quality: np.ndarray       # (J,) inlier fraction
-    triangulation_reproj_errors: np.ndarray # (J,) mean reprojection error (px)
-    cameras_smpl_frame: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]  # R, t, K
+    # (J,) mean reprojection error (px)
+    triangulation_reproj_errors: np.ndarray
+    cameras_smpl_frame: dict[str, tuple[np.ndarray,
+                                        np.ndarray, np.ndarray]]  # R, t, K
     frame_alignment: FrameAlignment | None
     extrinsics_source: str
     metrics: dict[str, float] = field(default_factory=dict)
@@ -66,8 +71,10 @@ class Phase5Pipeline:
         self.smpl = smpl_model
         self.cfg = config
         self.fitting_cfg = fitting_config or FittingConfig()
-        self._colmap_cam_map: dict[str, ColmapCamera] = {}  # populated by _load_colmap_cameras
-        self._view_orient: dict[str, int] = {}  # EXIF orientation per view (1,3,6,8)
+        # populated by _load_colmap_cameras
+        self._colmap_cam_map: dict[str, ColmapCamera] = {}
+        # EXIF orientation per view (1,3,6,8)
+        self._view_orient: dict[str, int] = {}
         self._W_colmap: int = 6000  # COLMAP landscape width
         self._H_colmap: int = 4000  # COLMAP landscape height
 
@@ -98,9 +105,11 @@ class Phase5Pipeline:
         # Step 1: Load camera extrinsics
         # -------------------------------------------------------------------
         if cfg.extrinsics_source == "colmap":
-            cameras_smpl, alignment = self._load_colmap_cameras(views, consensus)
+            cameras_smpl, alignment = self._load_colmap_cameras(
+                views, consensus)
         else:
-            cameras_smpl, alignment = self._load_selfcal_cameras(views, calibration_result)
+            cameras_smpl, alignment = self._load_selfcal_cameras(
+                views, calibration_result)
 
         if not cameras_smpl:
             raise RuntimeError("No valid cameras loaded. Cannot proceed.")
@@ -135,7 +144,8 @@ class Phase5Pipeline:
             if name in kp2d_per_view
         }
         # Build midpoint-expanded keypoints and confs
-        kp2d_full, confs_full = self._expand_midpoints(kp2d_per_view, confs_per_view)
+        kp2d_full, confs_full = self._expand_midpoints(
+            kp2d_per_view, confs_per_view)
 
         pts_3d, quality, reproj_errors = ransac_triangulate_joints(
             keypoints_per_view=kp2d_full,
@@ -152,7 +162,8 @@ class Phase5Pipeline:
         logger.info(
             "Triangulation: %d/%d joints successful, mean reproj=%.1fpx",
             n_good, len(joint_indices),
-            float(reproj_errors[quality > 0].mean()) if n_good > 0 else float("nan"),
+            float(reproj_errors[quality > 0].mean()
+                  ) if n_good > 0 else float("nan"),
         )
 
         # -------------------------------------------------------------------
@@ -161,7 +172,8 @@ class Phase5Pipeline:
         optimiser = SMPLOptimiser(self.smpl, COCO_TO_SMPL)
 
         # Map triangulated joints to SMPL joint indices for L_joint
-        triang_smpl = self._map_triangulated_to_smpl_joints(pts_3d, joint_indices)
+        triang_smpl = self._map_triangulated_to_smpl_joints(
+            pts_3d, joint_indices)
 
         kp2d_tensors = {
             k: np.array(v) for k, v in kp2d_per_view.items()
@@ -227,9 +239,11 @@ class Phase5Pipeline:
         """Load COLMAP extrinsics and align to SMPL frame."""
         cfg = self.cfg
         if cfg.colmap_model_dir is None:
-            raise ValueError("colmap_model_dir must be set when extrinsics_source='colmap'")
+            raise ValueError(
+                "colmap_model_dir must be set when extrinsics_source='colmap'")
 
-        colmap_cameras, colmap_images = read_colmap_model(Path(cfg.colmap_model_dir))
+        colmap_cameras, colmap_images = read_colmap_model(
+            Path(cfg.colmap_model_dir))
 
         view_names = [v.image_path.name for v in views]
         matched, missing = match_views_to_colmap(view_names, colmap_images)
@@ -243,7 +257,8 @@ class Phase5Pipeline:
                     len(colmap_cameras), len(colmap_images), len(matched))
 
         # Build COLMAP-frame cameras (before alignment)
-        colmap_frame_cams: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        colmap_frame_cams: dict[str,
+                                tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self._colmap_cam_map = {}
         first_cam_ref: ColmapCamera | None = None
         for name, img in matched.items():
@@ -262,7 +277,8 @@ class Phase5Pipeline:
         self._view_orient = {}
         for view in views:
             if view.image_path.name in matched:
-                self._view_orient[view.image_path.name] = self._get_exif_orient(view)
+                self._view_orient[view.image_path.name] = self._get_exif_orient(
+                    view)
 
         logger.info(
             "EXIF orientations: %s",
@@ -275,7 +291,8 @@ class Phase5Pipeline:
         kp2d_raw = self._all_to_landscape(kp2d_raw)
         for name in list(kp2d_raw):
             if name in self._colmap_cam_map:
-                kp2d_raw[name] = undistort_keypoints(kp2d_raw[name], self._colmap_cam_map[name])
+                kp2d_raw[name] = undistort_keypoints(
+                    kp2d_raw[name], self._colmap_cam_map[name])
 
         # RANSAC triangulation in COLMAP frame for alignment anchors.
         # Using RANSAC (not bare DLT) handles rear-view cameras where ViTPose
@@ -283,11 +300,14 @@ class Phase5Pipeline:
         # naive DLT point to infinity, corrupting the Procrustes scale.
         kp2d_full, confs_full = self._expand_midpoints(kp2d_raw, confs_raw)
         joint_indices = self._build_joint_indices()
-        ext_kp_indices = [idx for idx, _ in joint_indices]  # actual COCO indices, not range(14)
+        # actual COCO indices, not range(14)
+        ext_kp_indices = [idx for idx, _ in joint_indices]
 
         pts_colmap, quality_colmap, _ = ransac_triangulate_joints(
-            keypoints_per_view={n: kp2d_full[n] for n in kp2d_full if n in colmap_frame_cams},
-            confs_per_view={n: confs_full[n] for n in confs_full if n in colmap_frame_cams},
+            keypoints_per_view={n: kp2d_full[n]
+                                for n in kp2d_full if n in colmap_frame_cams},
+            confs_per_view={n: confs_full[n]
+                            for n in confs_full if n in colmap_frame_cams},
             cameras_per_view=colmap_frame_cams,
             joint_indices=ext_kp_indices,
             conf_threshold=cfg.triangulation_conf_threshold,
@@ -325,7 +345,8 @@ class Phase5Pipeline:
         for name, img in matched.items():
             cam = colmap_cameras[img.camera_id]
             K = build_pinhole_K(cam)
-            R_smpl, t_smpl = alignment.transform_camera(img.rotation, img.translation)
+            R_smpl, t_smpl = alignment.transform_camera(
+                img.rotation, img.translation)
             cameras_smpl[name] = (R_smpl, t_smpl, K)
 
         return cameras_smpl, alignment
@@ -337,7 +358,8 @@ class Phase5Pipeline:
     ) -> tuple[dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]], None]:
         """Load Phase 4 self-calibration cameras (already in SMPL frame)."""
         if calibration_result is None:
-            raise ValueError("calibration_result required for self_calibration source")
+            raise ValueError(
+                "calibration_result required for self_calibration source")
 
         cameras: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         for view in views:
@@ -416,7 +438,8 @@ class Phase5Pipeline:
         elif orient == 8:
             return np.column_stack([W - 1 - kps[:, 1], kps[:, 0]])
         else:
-            logger.warning("Unknown EXIF orientation %d, using identity", orient)
+            logger.warning(
+                "Unknown EXIF orientation %d, using identity", orient)
             return kps.copy()
 
     def _all_to_landscape(self, kp2d: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -436,7 +459,8 @@ class Phase5Pipeline:
         result = {}
         for name, kps in kp2d_ls.items():
             if name in self._colmap_cam_map:
-                result[name] = undistort_keypoints(kps, self._colmap_cam_map[name])
+                result[name] = undistort_keypoints(
+                    kps, self._colmap_cam_map[name])
             else:
                 result[name] = kps
         return result
@@ -529,7 +553,9 @@ class Phase5Pipeline:
         else:
             pa_mpjpe = float("nan")
 
-        reproj_errors: list[float] = []
+        # view_name -> list of reproj errors for valid joints
+        per_view_reproj: dict[str, list[float]] = defaultdict(list)
+
         for name, (R, t, K) in cameras.items():
             if name not in kp2d:
                 continue
@@ -542,12 +568,48 @@ class Phase5Pipeline:
                     refined.joints[smpl_idx:smpl_idx+1], R, t, K
                 )[0]
                 err = float(np.linalg.norm(proj - kps[coco_idx]))
-                reproj_errors.append(err)
+                per_view_reproj[name].append(err)
 
-        mean_reproj = float(np.mean(reproj_errors)) if reproj_errors else float("nan")
+        reproj_errors = [e for errs in per_view_reproj.values() for e in errs]
+
+        median_reproj = float(np.median(reproj_errors)
+                              ) if reproj_errors else float("nan")
+        mean_reproj = float(np.mean(reproj_errors)
+                            ) if reproj_errors else float("nan")
+
+        # compute per-view means
+        per_view_means = {
+            name: float(np.mean(errs))
+            if errs else float("nan")
+            for name, errs in per_view_reproj.items()
+        }
+        # using per-view means, compute median of these means - this provides the center
+        median_of_means = float(np.nanmedian(list(per_view_means.values())))
+        # using both, compute the MAD (median absolute deviation) of the per-view means to get a robust measure of reprojection consistency across views
+        # this provides outlier threhsold
+        mad_of_means = float(
+            np.median(
+                np.abs(
+                    np.array(list(per_view_means.values())) - median_of_means
+                )
+            )
+        )
+        # the median spread threshold is resistant to outliers, so if a few views have very high reprojection error, they won't skew the threshold as much as using mean would
+        # compute inlier means if per-view mean is within threshold of the median + 3*MAD (a common choice for outlier detection, roughly analogous to 3 standard deviations in a normal distribution))
+        inlier_view_means = [
+            mean for mean in per_view_means.values()
+            if mean <= median_of_means + (self.cfg.reprojection_mad_multiplier * mad_of_means)
+        ]
+        n_outlier_view = len(per_view_means) - len(inlier_view_means)
+
+        mean_reproj_inliers = float(np.mean(inlier_view_means))
+
         return {
             "pa_mpjpe_mm": pa_mpjpe,
             "mean_reproj_px": mean_reproj,
+            "median_reproj_px": median_reproj,
+            "mean_reproj_inliers_px": mean_reproj_inliers,
+            "n_outlier_views": n_outlier_view,
             "n_reproj_terms": len(reproj_errors),
         }
 
@@ -748,20 +810,24 @@ class Phase5Pipeline:
                     proj_ls = project_points(
                         refined.joints[smpl_idx:smpl_idx+1], R, t, K
                     )  # (1,2) landscape
-                    proj_det = self._landscape_to_det(proj_ls, orient)[0] * scale_f
+                    proj_det = self._landscape_to_det(
+                        proj_ls, orient)[0] * scale_f
                     x, y = int(proj_det[0]), int(proj_det[1])
                     if 0 <= x < w and 0 <= y < h:
-                        draw.ellipse([x-4, y-4, x+4, y+4], fill=(0, 200, 0), outline=(0, 200, 0))
+                        draw.ellipse([x-4, y-4, x+4, y+4],
+                                     fill=(0, 200, 0), outline=(0, 200, 0))
 
                 # Draw ViTPose detections (landscape undistorted coords → detection space)
                 if name in kp2d and name in confs:
                     for i, (kp_ls, c) in enumerate(zip(kp2d[name][:17], confs[name][:17])):
                         if c < 0.3:
                             continue
-                        kp_det = self._landscape_to_det(kp_ls.reshape(1, 2), orient)[0] * scale_f
+                        kp_det = self._landscape_to_det(
+                            kp_ls.reshape(1, 2), orient)[0] * scale_f
                         x, y = int(kp_det[0]), int(kp_det[1])
                         if 0 <= x < w and 0 <= y < h:
-                            draw.ellipse([x-3, y-3, x+3, y+3], fill=(255, 100, 0), outline=(255, 100, 0))
+                            draw.ellipse(
+                                [x-3, y-3, x+3, y+3], fill=(255, 100, 0), outline=(255, 100, 0))
 
                 img.save(overlay_dir / f"{name}_overlay.jpg")
             except Exception as exc:

@@ -41,9 +41,11 @@ class HMRConfig:
 
     backend: Literal["camerahmr"] = "camerahmr"
     device: str = "cuda"
-    checkpoint_path: Path = Path("models/checkpoints/camera_hmr/camerahmr_checkpoint_cleaned.ckpt")
+    checkpoint_path: Path = Path(
+        "models/checkpoints/camera_hmr/camerahmr_checkpoint_cleaned.ckpt")
     densekp_path: Path = Path("models/checkpoints/camera_hmr/densekp.ckpt")
-    cam_model_path: Path = Path("models/checkpoints/camera_hmr/cam_model_cleaned.ckpt")
+    cam_model_path: Path = Path(
+        "models/checkpoints/camera_hmr/cam_model_cleaned.ckpt")
     smpl_mean_params_path: Path = Path("models/smpl/smpl_mean_params.npz")
     smpl_model_path: Path = Path("models/smpl/SMPL_NEUTRAL.pkl")
     crop_size: int = 256
@@ -70,7 +72,8 @@ class CalibrationConfig:
     """Self-calibration configuration."""
 
     pnp_method: str = "SOLVEPNP_ITERATIVE"
-    ransac_threshold: float = 105.0  # pixels — generous for consensus mesh error (~32mm PA-MPJPE)
+    # pixels — generous for consensus mesh error (~32mm PA-MPJPE)
+    ransac_threshold: float = 105.0
     ransac_iterations: int = 5000
     min_inliers: int = 20          # dense views
     min_inliers_sparse: int = 6    # sparse views
@@ -78,7 +81,8 @@ class CalibrationConfig:
     dense_conf_threshold: float = 0.3
     sparse_conf_threshold: float = 0.3
     refine_lm: bool = True
-    max_reprojection_error: float = 80.0  # px — quality gate (consensus mesh ~32mm error → ~50px projected)
+    # px — quality gate (consensus mesh ~32mm error → ~50px projected)
+    max_reprojection_error: float = 80.0
     save_debug: bool = True
     debug_dir: Path = Path("output/debug/calibration")
 
@@ -122,13 +126,19 @@ class Phase5Config:
     colmap_model_dir: Path | None = None
 
     # Triangulation
-    triangulation_conf_threshold: float = 0.3   # min ViTPose confidence to include a view
+    # min ViTPose confidence to include a view
+    triangulation_conf_threshold: float = 0.3
     triangulation_min_views: int = 3             # min views required per joint
-    ransac_reproj_threshold: float = 100.0       # px — RANSAC inlier threshold (ViTPose noise ~50px on 6000px images)
+    # px — RANSAC inlier threshold (ViTPose noise ~50px on 6000px images)
+    ransac_reproj_threshold: float = 100.0
     ransac_iterations: int = 100
 
     # Frame alignment
     min_alignment_joints: int = 4               # min joints required for Procrustes
+
+    # Refinement
+    # Median Absolute Deviation (MAD) threshold for outlier view rejection
+    reprojection_mad_multiplier: float = 3.0
 
     # Debug
     save_debug: bool = True
