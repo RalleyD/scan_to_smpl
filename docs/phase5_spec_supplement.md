@@ -37,11 +37,11 @@ The cross product (A x B) gives a vector perpendicular to `up_vector` and `shoul
 up_vector * shoulder_vector = cross([0,1,0] * [1,0,0])
 = [0,0,-1]
 
-This is perpendicular to "up" and "left" which can either be "forward" or "backward". The third axis that completes the right-hand coordinate system comes out at -Z. This becomes the front of the body.
+This is perpendicular to "up" and "left" which can either be "forward" or "backward". The third axis that completes the right-hand coordinate system comes out at Z. This becomes the front of the body.
 
-**why -Z?**
+**why Z?**
 
-The default SMPL was designed so a viewer standing at `Z = -inf` i.e some arbitrary point along the -Z axis, looking towards +Z (think, down along the Z-axis) sees the person's face and chest. The chest faces the viewer, so it points in the -Z direction (toward the viewer). Therefore, the subject's back must be facing +Z.
+The default SMPL was designed so a viewer standing at `Z = -inf` i.e some arbitrary point along the Z axis, looking towards +Z (think, down along the Z-axis) sees the person's face and chest. The chest faces the viewer, so it points in the Z direction (toward the viewer). Therefore, the subject's back must be facing -Z.
 
 In order to guard against an undeterminable direction, normalise the body_front_vector. If the value is incredibly small e.g. <1e-6 then we can't determine the orientation.
 
@@ -92,7 +92,7 @@ we already have two vectors:
 
 `body_front = [0,0,-1]`
 
-If the camera is in front of the body, relative to the `body_front` direction, both are heading towards the -Z side, therefore the dot-product is positive.
+If the camera is in front of the body, relative to the `body_front` direction, both are heading towards the +Z side, therefore the dot-product is positive.
 
 If the camera is behing the body, relative to the body_front, they're pointing the opposite way, therefore the dot-product is negative.
 
@@ -214,6 +214,27 @@ COLMAP cameras are sub-pixel accurate for COLMAP's own features but may have res
 - Camera translation drift bounded < 0.1m (sanity check, no overfitting)
 - PA-MPJPE unchanged or slightly better
 
+### Theory
+
+PnP log shows per-camera reprojection at 37-72px — basically right at the ViTPose noise floor. Compare to our Phase 5 median of 137px. The gap is ~80px of camera calibration drift that COLMAP+Procrustes can't fix.
+
+```
+pytest tests/integration/test_pnp_integration.py -v -m gpu
+```
+
+Where the drift comes from: COLMAP's [R|t] is sub-pixel accurate for COLMAP's own features (SIFT/SfM keypoints on textured surfaces). But ViTPose detects body joints, not SIFT features. There's a small but systematic offset between where COLMAP thinks the camera is and where it would need to be for ViTPose joints to project correctly. Procrustes alignment then transforms cameras into SMPL frame but doesn't fix per-camera drift — it just rigidly rotates/translates the whole set.
+
+PnP refinement is defined by minimising per-camera reprojection error — that's literally its objective function.
+
+PnP refinement fixes this directly: it takes the refined 3D SMPL joints (which we now trust because Phase 5 is converged) and the 2D ViTPose detections, and asks cv2.solvePnPRansac to re-derive each camera's [R|t] to make these correspondences consistent. Per-camera drift gets absorbed into per-camera [R|t] adjustments.
+
+re-run the optimiser with the PnP-refined cameras, the reprojection loss now has a much cleaner signal (~50px instead of ~140px). The optimiser can use the reprojection term meaningfully — currently every gradient is in the linear regime with delta=20, but with errors near 50px there'd be useful quadratic shape to the loss. PA-MPJPE should drop, plausibly into the high-teens / low-20s.
+
+ important caveat to be aware of:
+
+PnP "improving" the reprojection metric isn't purely an improvement — it's also partly the cameras absorbing error to satisfy the metric. Imagine the worst case: you give PnP enough freedom that it just fits the cameras to whatever 3D joints you have, even if those joints are slightly wrong. Then reprojection is artificially perfect but the cameras have moved off their true positions. The spec supplement guards against this with pnp_refine_max_translation_m: 0.1 — bounding how far cameras can drift from their COLMAP-derived [R|t].
+
+So the genuine improvement is: cameras get small, plausible adjustments that absorb COLMAP↔ViTPose calibration drift. The cosmetic improvement is everything beyond that — and it's hard to tell them apart from the metric alone. The translation bound is what keeps you honest.
 ---
 
 ## Spec Supplement — Option C (Frontal 8 views + Phase 4 self-cal)
