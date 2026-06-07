@@ -1,6 +1,7 @@
 """Joint mapping constants: COCO-17 <-> SMPL-24 and CameraHMR dense keypoints."""
 
 import numpy as np
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # COCO-17 -> SMPL-24 joint mapping
@@ -21,6 +22,14 @@ import numpy as np
 #   16: left_shoulder, 17: right_shoulder, 18: left_elbow,
 #   19: right_elbow, 20: left_wrist, 21: right_wrist,
 #   22: left_hand, 23: right_hand
+
+
+class Smpl24Joint:
+    PELVIS = 0
+    NECK = 12
+    LEFT_SHOULDER = 16
+    RIGHT_SHOULDER = 17
+
 
 COCO_TO_SMPL: dict[int, int] = {
     5: 16,   # left_shoulder

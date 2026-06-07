@@ -21,6 +21,86 @@ Implementation in [pipeline.py](scantosmpl/fitting/pipeline.py):
 - For rear cameras: drop from `kp2d_tensors`/`confs_tensors` passed to optimiser, OR apply L/R swap to their keypoints
 - Use SMPL pelvis-to-spine vector as "forward" (it's the canonical body axis); rear = camera_to_body direction dot forward > 0 (camera is behind the body)
 
+#### A1 - Theory
+
+**How do we determine the front of the body?**
+
+Consider the SMPL body in its canonical A-pose.
+
+up_vector = pelvis -> neck = [0, 1, 0] <- The body's spine goes straight-up +Y.
+shoulder_vector = left_shoulder - right_shoulder = [1, 0, 0] <- SMPL labels left shoulder right-handed at +X.
+
+Therefore, consider the right-hand rule: point right index finger up +Y, curl middle finger down to -X, the thumb points in the resulting Z direction (towardss you).
+
+The cross product (A x B) gives a vector perpendicular to `up_vector` and `shoulder_vector`:
+
+up_vector * shoulder_vector = cross([0,1,0] * [1,0,0])
+= [0,0,-1]
+
+This is perpendicular to "up" and "left" which can either be "forward" or "backward". The third axis that completes the right-hand coordinate system comes out at -Z. This becomes the front of the body.
+
+**why -Z?**
+
+The default SMPL was designed so a viewer standing at `Z = -inf` i.e some arbitrary point along the -Z axis, looking towards +Z (think, down along the Z-axis) sees the person's face and chest. The chest faces the viewer, so it points in the -Z direction (toward the viewer). Therefore, the subject's back must be facing +Z.
+
+In order to guard against an undeterminable direction, normalise the body_front_vector. If the value is incredibly small e.g. <1e-6 then we can't determine the orientation.
+
+Else, body front is divided by the norm to get a normalised output.
+
+---
+
+**Now know which direction the body is facing, how do we determine the camera position?**
+
+First, lets get the subject-relative camera position - COLMAP extrinsic convention transforms a world point into camera coordinates:
+
+`p_cam = R @ p_world +t`
+
+The camera origin (C) is the world-point that provides the camera centre i.e p_cam = 0:
+
+orthonormal - unit length and perpendicular to eachother.
+
+`t` encodes where the world origin sits in camera space. To get the camera centre in world space, you invert it.
+
+```
+0 = R @ C + t  # t in COLMAP is "where is the world origin expressed in cam coords?"
+R @ C = -t  # take the inverse of R both sides to remove R from the lef
+R^-1 @ R @ C = R^-1 @ (-t) # * -1 "Where is the camera origin, expressed in world coords?"
+# R is a rotation matrix and therefore orthogonal (.T for transpose, dot product of every column pair)
+R.T @ R @ C = R.T @ (-t)
+# R.T @ R = I (identity matrix) think of this as 1 i.e I @ thing = that thing.
+I @ C = R.T @ (-t)
+C = R.T @ (-t)  # flip the sign on one-side gives the same result
+C = -R.T @ t  # a cleaner way to express it
+```
+
+**Then, how do we know whether it's behind or in front of the body?**
+
+The dot product can be used to determine the angle between two vectors.
+
+if the dot product is between >0->1 they're pointing in the same direction
+
+(think of RAG cosine similarity, bigger number means more closely related)
+
+if the dot product is between -1 -> 0<, they're pointing in the opposite direction.
+
+Yes - we assume the camera's gaze is always pointing in the right direction.
+We're interested in whether the camera is on the front or back side of the body, expressed as a single value. Purely a question of position.
+
+we already have two vectors:
+
+`cam_offset = C - joints[0] <- neck, can also use joints[12] for pelvis, anything for body centre`
+
+`body_front = [0,0,-1]`
+
+If the camera is in front of the body, relative to the `body_front` direction, both are heading towards the -Z side, therefore the dot-product is positive.
+
+If the camera is behing the body, relative to the body_front, they're pointing the opposite way, therefore the dot-product is negative.
+
+Analagous to a person facing north - we want to know if someone is standing in front of them. We don't care, in this case, which way they're looking, we just want to know their position relative to the body.
+
+`dot(cam_offset, body_front)`
+
+
 ### A2. Reframe metrics
 
 In `_compute_metrics` at [pipeline.py:485](scantosmpl/fitting/pipeline.py#L485):

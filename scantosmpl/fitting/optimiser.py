@@ -15,6 +15,7 @@ from scantosmpl.fitting.losses import (
 )
 from scantosmpl.hmr.consensus import ConsensusResult
 from scantosmpl.smpl.model import SMPLModel
+from scantosmpl.smpl.joint_map import Smpl24Joint
 from scantosmpl.utils.geometry import compute_pa_mpjpe
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,38 @@ class SMPLOptimiser:
         self.coco_to_smpl = coco_to_smpl
         self.device = smpl_model.device
 
+    def _classify_rear_views(self,
+                             consensus: ConsensusResult,
+                             cameras: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+                             ) -> set[str]:
+
+        # left shoulder at +X
+        shoulder_vec = consensus.joints[Smpl24Joint.LEFT_SHOULDER] - \
+            consensus.joints[Smpl24Joint.RIGHT_SHOULDER]
+        up_vec = consensus.joints[Smpl24Joint.NECK] - \
+            consensus.joints[Smpl24Joint.PELVIS]
+        # should be -Z for rear view, +Z for front view
+        # order is important for -Z: up_vec, shoulder_vec
+        body_back_vec = np.cross(up_vec, shoulder_vec)
+
+        # in case the body pose is undeterminate, normalise the front vector to avoid classifying all vectors as rear
+        norm = np.linalg.norm(body_back_vec)
+        if norm < 1e-6:
+            return set()
+        body_back_vec = body_back_vec / norm
+
+        rear_views = []
+        for name, (R, t, K) in cameras.items():
+            cam_centre = -R.T @ t
+            cam_offset = cam_centre - consensus.joints[Smpl24Joint.PELVIS]
+            cam_dot = np.dot(cam_offset, body_back_vec)
+            if cam_dot > 0:
+                rear_views.append(name)
+
+        logger.info("Rear views detected: %s", rear_views)
+
+        return set(rear_views)
+
     def refine(
         self,
         consensus: ConsensusResult,
@@ -130,6 +163,12 @@ class SMPLOptimiser:
         """
         if stages is None:
             stages = DEFAULT_STAGES
+
+        rear_views = self._classify_rear_views(consensus, cameras)
+        front_cameras = {
+            cam: mat for cam, mat in cameras.items()
+            if cam not in rear_views
+        }
 
         # Initialise SMPL params from consensus
         self.smpl.set_params(
@@ -162,7 +201,7 @@ class SMPLOptimiser:
                 torch.tensor(t, dtype=torch.float32, device=self.device),
                 torch.tensor(K, dtype=torch.float32, device=self.device),
             )
-            for name, (R, t, K) in cameras.items()
+            for name, (R, t, K) in front_cameras.items()
         }
 
         all_loss_history: dict[str, list[float]] = {}
