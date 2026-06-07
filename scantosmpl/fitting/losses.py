@@ -28,7 +28,8 @@ def joint_loss(
     # Per-joint L2 distance, then Huber
     diff = pred - target                    # (J, 3)
     err = torch.norm(diff, dim=-1)          # (J,)
-    loss = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta, reduction="none")  # (J,)
+    loss = F.huber_loss(err, torch.zeros_like(
+        err), delta=huber_delta, reduction="none")  # (J,)
 
     if joint_weights is not None:
         w = joint_weights.to(pred.device)
@@ -83,7 +84,8 @@ def reprojection_loss(
 
         # Perspective divide
         pts_img_h = (K @ pts_cam.T).T          # (J_smpl, 3)
-        pts_img = pts_img_h[:, :2] / pts_img_h[:, 2:3].clamp(min=1e-6)  # (J_smpl, 2)
+        pts_img = pts_img_h[:, :2] / pts_img_h[:,
+                                               2:3].clamp(min=1e-6)  # (J_smpl, 2)
 
         # Match COCO indices to SMPL joints
         for coco_idx, smpl_idx in coco_to_smpl.items():

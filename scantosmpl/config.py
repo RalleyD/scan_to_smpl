@@ -138,6 +138,8 @@ class Phase5Config:
 
     # Refinement
     # Median Absolute Deviation (MAD) threshold for outlier view rejection
+    # this alows for some tolerance to noise (e.g side views) while rejecting views with high reprojectction error
+    # e.g. rear views with misdetections due to occlusion.
     reprojection_mad_multiplier: float = 3.0
 
     # Debug

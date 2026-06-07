@@ -74,7 +74,7 @@ DEFAULT_STAGES: list[OptimisationStage] = [
     OptimisationStage(
         name="full_refinement",
         params=["betas", "body_pose", "global_orient", "translation", "scale"],
-        n_iterations=200,
+        n_iterations=400,
         w_joint=0.1,
         w_reproj=1.0,
         w_pose_prior=0.01,
@@ -133,10 +133,14 @@ class SMPLOptimiser:
 
         # Initialise SMPL params from consensus
         self.smpl.set_params(
-            betas=torch.tensor(consensus.betas, dtype=torch.float32, device=self.device).unsqueeze(0),
-            body_pose=torch.tensor(consensus.body_pose, dtype=torch.float32, device=self.device).unsqueeze(0),
-            global_orient=torch.tensor(consensus.global_orient, dtype=torch.float32, device=self.device).unsqueeze(0),
-            translation=torch.zeros(1, 3, dtype=torch.float32, device=self.device),
+            betas=torch.tensor(
+                consensus.betas, dtype=torch.float32, device=self.device).unsqueeze(0),
+            body_pose=torch.tensor(
+                consensus.body_pose, dtype=torch.float32, device=self.device).unsqueeze(0),
+            global_orient=torch.tensor(
+                consensus.global_orient, dtype=torch.float32, device=self.device).unsqueeze(0),
+            translation=torch.zeros(
+                1, 3, dtype=torch.float32, device=self.device),
             scale=torch.ones(1, dtype=torch.float32, device=self.device),
         )
 
@@ -212,7 +216,8 @@ class SMPLOptimiser:
 
                 # Early stopping if converged
                 if abs(prev_loss - loss_val) < 1e-7 and it > 10:
-                    logger.debug("Stage '%s' converged at iter %d", stage.name, it)
+                    logger.debug(
+                        "Stage '%s' converged at iter %d", stage.name, it)
                     break
                 prev_loss = loss_val
 
@@ -271,6 +276,7 @@ class SMPLOptimiser:
         result = []
         for name in param_names:
             if name not in param_map:
-                raise ValueError(f"Unknown parameter: '{name}'. Valid: {list(param_map)}")
+                raise ValueError(
+                    f"Unknown parameter: '{name}'. Valid: {list(param_map)}")
             result.append(param_map[name])
         return result

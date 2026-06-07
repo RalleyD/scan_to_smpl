@@ -68,6 +68,23 @@ Expected after A1–A4:
 
 Inspect `output/debug/refinement/reprojection_overlay/*.jpg` — green (SMPL projections) should align with orange (ViTPose) on frontal views.
 
+### Option A - Discission and Explanation
+
+The pipeline order for coarse refinement (using COLMAP camera views):
+
+1) Triangulation: given known camera positions and 2D detections across mulitple views, reconstruct 3D joint positions using Direct Linear Transform and RANSAC. This runs once, before the optimiser.
+2) Refinement: iterative SMPL parameter optimisation that adjusts betas, theta, translation and scale to minimise a combination of losses against the triangulated 3D joints and the 2D reprojections.
+3) Reprojection: project a 3D SMPL joint through a Camera's pose [R|t|K] into 2D, and measure the pixel distance to the observed ViTPose keypoint (on a per-view basis). This is used as a loss signal in the Refinement stage and for quality metrics afterwards.
+
+Currently, the rear views contaminate the reprojection stage.
+
+- Triangulation: is protected from this because RANSAC votes across all views, per-joint. A rear-view with swapped L/R wrist dectections will disagree with the 10+ frontal views on where the right-wrist is. RANSAC marks those observations as outliers and the quality score reflects this (currently, 0.56-0.75). As a result, 3D position is computed from the inlier frontal views only.
+- Reprojection: in the loss function, there is no RANSAC. Every view's loss term is summed. A rear-view camera contributes with points swapped putting loss in the wrong direction. The optimiser doesn't care and gets pulled toward a signal that satisfies no view well.
+
+The A1 option above will exclude rear views from the reprojection loss.
+Potentially, removing rear views in the Phase 3 consensus *might* help. But the confidence weighted mean already down-weights low-confidence detections. CameraHMR single-view estimates already embed strong priors.
+Trying to mirror the joints in rear views for RANSAC adds complexity with marginal gains. We're already capturing all joints in multiple views with good quality.
+
 ---
 
 ## Spec Supplement — Option A+B (PnP camera refinement)
