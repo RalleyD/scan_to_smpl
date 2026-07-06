@@ -307,8 +307,107 @@ Optional: re-run PnP with refined Tier 2 SMPL → re-triangulate → re-optimise
 
 ## Phase 5
 
-TODO - spec ready
+in progress - specs ready:
 
+### Use of PnP RANSAC and Justification for "Option A+B"
+
+The PnP log shows per-camera reprojection at 37-72 px. This is essentially the ViTPoser noise floor. Compared to the Phase 5 median of 137 px, the gap is ~80 px of camera calibraiton drift that COLMAP+Procrustes can't fix:
+
+```
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=13, need=20)
+26-06-07 21:55:31 INFO cam01_2.JPG: dense PnP failed (13 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam01_2.JPG: OK (dense_sparse_fallback, inliers=10/14, reproj=65.7px)
+26-06-07 21:55:31 INFO cam01_6.JPG: OK (sparse_coco, inliers=7/14, reproj=64.1px)
+26-06-07 21:55:31 INFO cam02_4.JPG: OK (sparse_coco, inliers=7/13, reproj=37.5px)
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=10, need=20)
+26-06-07 21:55:31 INFO cam02_5.JPG: dense PnP failed (10 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam02_5.JPG: OK (dense_sparse_fallback, inliers=6/12, reproj=38.4px)
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=13, need=20)
+26-06-07 21:55:31 INFO cam03_5.JPG: dense PnP failed (13 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam03_5.JPG: OK (dense_sparse_fallback, inliers=7/14, reproj=43.1px)
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=14, need=20)
+26-06-07 21:55:31 INFO cam03_6.JPG: dense PnP failed (14 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam03_6.JPG: OK (dense_sparse_fallback, inliers=8/13, reproj=63.6px)
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=15, need=20)
+26-06-07 21:55:31 INFO cam04_4.JPG: dense PnP failed (15 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam04_4.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=62.0px)
+26-06-07 21:55:31 WARNING PnP dense_138: RANSAC too few inliers (inliers=11, need=20)
+26-06-07 21:55:31 INFO cam04_5.JPG: dense PnP failed (11 inliers), falling back to sparse
+26-06-07 21:55:31 INFO cam04_5.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=38.4px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=11, need=20)
+26-06-07 21:55:32 INFO cam05_4.JPG: dense PnP failed (11 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam05_4.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=44.9px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=12, need=20)
+26-06-07 21:55:32 INFO cam05_5.JPG: dense PnP failed (12 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam05_5.JPG: OK (dense_sparse_fallback, inliers=7/12, reproj=47.7px)
+26-06-07 21:55:32 INFO cam05_6.JPG: OK (sparse_coco, inliers=6/14, reproj=52.8px)
+26-06-07 21:55:32 INFO cam06_4.JPG: OK (sparse_coco, inliers=6/14, reproj=47.5px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=12, need=20)
+26-06-07 21:55:32 INFO cam07_4.JPG: dense PnP failed (12 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam07_4.JPG: OK (dense_sparse_fallback, inliers=10/14, reproj=45.1px)
+26-06-07 21:55:32 INFO cam07_6.JPG: OK (sparse_coco, inliers=8/14, reproj=47.6px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=10, need=20)
+26-06-07 21:55:32 INFO cam10_2.JPG: dense PnP failed (10 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam10_2.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=48.0px)
+26-06-07 21:55:32 INFO cam10_4.JPG: OK (sparse_coco, inliers=10/14, reproj=54.4px)
+26-06-07 21:55:32 INFO cam10_5.JPG: OK (sparse_coco, inliers=11/14, reproj=45.7px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=14, need=20)
+26-06-07 21:55:32 INFO cam01_2.JPG: dense PnP failed (14 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam01_2.JPG: OK (dense_sparse_fallback, inliers=10/14, reproj=59.8px)
+26-06-07 21:55:32 INFO cam01_6.JPG: OK (sparse_coco, inliers=9/14, reproj=56.4px)
+26-06-07 21:55:32 INFO cam02_4.JPG: OK (sparse_coco, inliers=7/13, reproj=55.5px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=11, need=20)
+26-06-07 21:55:32 INFO cam02_5.JPG: dense PnP failed (11 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam02_5.JPG: OK (dense_sparse_fallback, inliers=7/12, reproj=68.1px)
+26-06-07 21:55:32 WARNING PnP dense_138: RANSAC too few inliers (inliers=12, need=20)
+26-06-07 21:55:32 INFO cam03_5.JPG: dense PnP failed (12 inliers), falling back to sparse
+26-06-07 21:55:32 INFO cam03_5.JPG: OK (dense_sparse_fallback, inliers=7/14, reproj=45.3px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=12, need=20)
+26-06-07 21:55:33 INFO cam03_6.JPG: dense PnP failed (12 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam03_6.JPG: OK (dense_sparse_fallback, inliers=8/13, reproj=48.7px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=17, need=20)
+26-06-07 21:55:33 INFO cam04_4.JPG: dense PnP failed (17 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam04_4.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=57.2px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=10, need=20)
+26-06-07 21:55:33 INFO cam04_5.JPG: dense PnP failed (10 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam04_5.JPG: OK (dense_sparse_fallback, inliers=8/14, reproj=37.3px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=11, need=20)
+26-06-07 21:55:33 INFO cam05_4.JPG: dense PnP failed (11 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam05_4.JPG: OK (dense_sparse_fallback, inliers=9/14, reproj=38.5px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=13, need=20)
+26-06-07 21:55:33 INFO cam05_5.JPG: dense PnP failed (13 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam05_5.JPG: OK (dense_sparse_fallback, inliers=7/12, reproj=48.3px)
+26-06-07 21:55:33 INFO cam05_6.JPG: OK (sparse_coco, inliers=6/14, reproj=36.6px)
+26-06-07 21:55:33 INFO cam06_4.JPG: OK (sparse_coco, inliers=6/14, reproj=52.5px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=13, need=20)
+26-06-07 21:55:33 INFO cam07_4.JPG: dense PnP failed (13 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam07_4.JPG: OK (dense_sparse_fallback, inliers=9/14, reproj=42.0px)
+26-06-07 21:55:33 INFO cam07_6.JPG: OK (sparse_coco, inliers=8/14, reproj=55.1px)
+26-06-07 21:55:33 WARNING PnP dense_138: RANSAC too few inliers (inliers=10, need=20)
+26-06-07 21:55:33 INFO cam10_2.JPG: dense PnP failed (10 inliers), falling back to sparse
+26-06-07 21:55:33 INFO cam10_2.JPG: OK (dense_sparse_fallback, inliers=9/14, reproj=72.3px)
+26-06-07 21:55:33 INFO cam10_4.JPG: OK (sparse_coco, inliers=10/14, reproj=53.7px)
+26-06-07 21:55:33 INFO cam10_5.JPG: OK (sparse_coco, inliers=10/14, reproj=57.1px)
+```
+
+**Where the drift comes from:**
+
+COLMAP's [R|t] is sub-pixel accurate for COLMAP's own features (SIFT/SfM keypoints on textured surfaces). ViTPoser detects body joints, not SIFT features. This is a systematic offset between where COLMAP thinks the camera is and where it would need to be for ViTPose joints to project correctly (think surface vs joint offsets). Procrustes alignment then transforms cameras into SMPL frame, but doesn't fix per-camera drift - it just rigidly rotates or transforms the whole set.
+
+PnP refinement fixes this directly, it takes the refined 3D SMPL joints (which are now trusted at Phase 5 convergence) and the 2D ViTPose detections and asks `cv2.solvePnPRansac` to re-derive each camera's [R|t] to make these correspondences consistent. Per-camera drift gets absorbed into the per-camera [R|t] adjustments. 
+
+Option A+B desribes this, from the spec supplement doc, confirmed by the PnP log (~50 px is achievable per-view):
+
+1) Implement A+B: post-refinement PnP pass over each camera, using `refined.joints` (3D) and the undistorted ViTPose landscape keypoints (2D). The existing phase 4 PnP module `pnp_solver.py` could be reused. An iterative approach:
+   1) A single-pass PnP refines cameras. Yielding a cleaner reprojection metric, but the SMPL joints don't change (refinement has already happened). So PA-MPJPE is unchanged.
+2) re-compute metrics with the refined cameras to confirm median reprojection drops from 137 px to ~50-70 px. 
+   1) Re-run the optimiser with the PnP-refined cameras. The reprojection-loss has a cleaner signal (~50-70 px, instead of ~140 px). The optimiser can use the reprojection term meaninfully. Currently every gradient is in the liner reginme, huber delta = 20. With lower reprojection there should be useful quadratic shape to the loss. Therfore PA-MPJPE should drop.
+
+Cameras therefore, get small and plausible adjustments that abosrb COLMAP to ViTPose calibration drift.
+
+**The caveat:**
+
+PnP is improving the reprojection metric by each camera absorbing error to satisfy the metric. Given the scenario: giving PnP enough freedom that it fits the camera to whatever 3D joints are present, even if those joints are wrong. The reprojection becomes artificially good but the cameras have moved out of their true positions. This requires a guard i.e `pnp_refine_max_translation_m: 0.1` - bounding how far cameras can drift from their COLMAP-derived [R|t] - keeping the translation honest.
 
 ---
 
