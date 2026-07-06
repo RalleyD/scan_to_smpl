@@ -309,7 +309,115 @@ Optional: re-run PnP with refined Tier 2 SMPL → re-triangulate → re-optimise
 
 in progress - specs ready:
 
-### Use of PnP RANSAC and Justification for "Option A+B"
+### What's been developed in Phase 5
+
+Phase 5 was originally spec'd (docs/phase5_spec.md, the file you have open) around COLMAP as the primary extrinsics source: parse COLMAP's cameras.bin/images.bin, run a 7-DoF Procrustes alignment to map COLMAP's arbitrary SfM frame into SMPL's canonical frame, undistort the 2D keypoints, triangulate 3D joints via DLT+RANSAC across views, then run a 3-stage SMPL optimiser (global alignment → shape → full pose) against those triangulated joints plus direct 2D reprojection. Self-calibration (cold PnP against SMPL joints, no COLMAP) was there too, but only as a fallback stub.
+
+Since then, in the sessions leading up to today:
+
+Reprojection metrics were reworked from mean to median (the original 15px target was unrealistic on a 6000px image, and rear-view ViTPose left/right swaps were blowing out the mean — see the note at the bottom of phase5_spec.md).
+
+Rear-view classification/exclusion was added so those swapped-keypoint views get filtered out of the reprojection loss entirely rather than just averaged down.
+
+A further feature was attempted on top of COLMAP: iteratively refining the COLMAP camera poses via PnP against the SMPL joints ("Option A+B"). It was implemented, tested against real data, and made things worse — only 3-4 of 7 frontal cameras actually refined, reprojection error went up, PA-MPJPE regressed to 25-27mm. That's documented in the master spec as the risk materializing: cameras absorbing SMPL joint error instead of correcting real drift. It was reverted.
+
+A controlled experiment then compared Phase 4's existing cold self-calibration directly against COLMAP+Procrustes on the same real dataset, and self-cal won outright: 23.99mm vs 24.46mm PA-MPJPE, 78.8px vs 135.2px median reprojection.
+
+Today's feature (selfcal-default-extrinsics) acted on that result: it fully retired COLMAP from Phase 5 — deleted the COLMAP reader, frame-alignment, and undistortion modules, stripped the now-dead config fields (extrinsics_source, colmap_model_dir, the abandoned PnP-refinement knobs), simplified Phase5Pipeline/Phase5Config/Phase5Result down to a single code path, and rewrote the integration tests around a self-cal-only fixture.
+
+### The milestone
+
+Phase 5 (Tier 2: self-calibration + refinement) is now a complete, coherent, genuinely calibration-free pipeline stage — matching the project's core CLAUDE.md premise ("no camera extrinsics required, human body as calibration target"). There's no more COLMAP dependency, no more SfM reconstruction step, no more coordinate-frame bridging between two different calibration systems. The chain is now: Tier 1 consensus (per-view HMR) → Phase 4 self-calibration (PnP) → Phase 5 triangulation + staged SMPL refinement, entirely self-contained.
+
+Measured on your real 17-camera t-pose dataset: PA-MPJPE ~22.5mm (refinement) / ~25mm (triangulation-vs-consensus), median reprojection ~77px — beating every acceptance threshold with margin, and better than the old COLMAP path ever achieved. All 10 acceptance criteria for this cleanup passed on the first review iteration, lint/typecheck clean, full GPU integration suite green.
+
+What's not done: Tier 3 (point-cloud/surface refinement) is still an empty package — that's the next tier, not started. And everything from today is still uncommitted, per our last exchange.
+
+### PnP — what it is and why it's here
+
+Perspective-n-Point: given N known 3D points and their corresponding 2D pixel locations in an image (plus known camera intrinsics — focal length, principal point), recover the camera's pose: the 6-DOF rotation + translation that would make those 3D points project to exactly those 2D pixels. It's the classic "solve for where the camera must have been standing" problem.
+
+In this pipeline, the 3D points are the SMPL/consensus body-joint positions (already estimated from Tier 1, in a canonical body-centered frame) and the 2D points are where ViTPose detected those same joints in each photo. Solving PnP per view recovers a camera pose without any external calibration rig — the body itself becomes the calibration target, hence "self-calibration."
+
+### RANSAC — what it is and why it's here
+
+RANdom SAmple Consensus: a way to fit a model when some of your data is wrong (outliers) and you don't know which points those are in advance. Instead of fitting to all points at once, it repeatedly: samples a small random subset, fits the model to just that subset, then checks how many of the remaining points agree with that fit within some tolerance ("inliers"). Whichever random subset produces the fit with the most inliers wins; often a final fit is redone using all inliers together.
+
+Here it's used twice: solvePnPRansac (Phase 4) tolerates a few badly-wrong 2D-3D correspondences without corrupting the whole camera pose — important because ViTPose genuinely does produce garbage on some views (the left/right swap on rear-facing cameras). And again in DLT triangulation (Phase 5), across views rather than points — if 2 of 7 cameras disagree wildly with the rest on where a joint is in 3D, RANSAC discards those 2 rather than letting them drag the triangulated position off.
+
+### Does self-cal PnP produce artificially good numbers by absorbing camera drift?
+
+This is a sharp question, and the honest answer is: partially yes, and it's worth being clear-eyed about it rather than just trusting the numbers.
+
+The specific failure mode you're describing — a PnP solve quietly compensating for bias in the 3D points it's given, rather than reporting a real discrepancy — is exactly the risk the master spec documented for the abandoned PnP-camera-refinement feature, and it's exactly what happened when that feature was tested (cameras drifted to chase noisy SMPL estimates, reprojection got worse, PA-MPJPE regressed). So this isn't a hypothetical concern for this codebase — it's a documented, previously-observed failure mode.
+
+The current (accepted) self-cal path is a somewhat different situation, though, and it's worth separating two things:
+
+- Coherent/systematic error (e.g. the whole consensus mesh is a few mm too short, or globally rotated slightly) — a single 6-DOF camera pose can and likely will absorb this kind of error per view, because a rigid transform is exactly the right shape to cancel out a rigid bias. None of the current metrics (reprojection error, PA-MPJPE-vs-triangulation) would catch this, because the whole system — consensus mesh, self-cal cameras, triangulated joints, refined SMPL — would simply be self-consistent around the same bias. This is a real structural blind spot: there's currently no fully independent ground truth in the loop (no calibrated mocap rig, no physically measured body dimensions, and COLMAP — the one independent geometric reference that existed — has just been removed).
+
+- Per-point/per-view incoherent noise (individual joint estimation error, individual bad ViTPose detections) — this is not something a single camera pose can fully absorb, because it doesn't look like a rigid transform; and RANSAC explicitly discards the worst offenders rather than quietly folding them in. Multi-view triangulation adds more protection here too: a triangulated joint has to be geometrically consistent with rays from several independently self-calibrated cameras, which is a real overdetermination check for this class of error.
+
+So: the reprojection-error and PA-MPJPE numbers you're seeing should be read as measuring internal consistency (do the 2D detections, the recovered cameras, and the fitted 3D body agree with each other) rather than absolute real-world accuracy. They're genuinely useful for catching per-joint noise and bad views, genuinely good evidence that the pipeline isn't falling apart — but they can't, by construction, catch a coherent bias shared across the whole system.
+
+The one piece of evidence that argues against gross circularity is the A/B result against COLMAP: COLMAP's camera poses have zero knowledge of the SMPL mesh (pure SIFT/SfM), so if self-cal were purely "cheating" by absorbing large consensus error, you might expect it to diverge more from an independent reference, not less. But that comparison is also confounded — COLMAP itself had known problems on this dataset (4/17 views ~180° wrong per the original Phase 4 notes), so beating a flawed baseline is better read as "self-cal is more internally consistent than bolting together two mismatched coordinate systems" than as "self-cal is independently proven accurate."
+
+**If you want a genuine independent check later: **
+
+The natural candidate (per the master spec's §9 notes) is Tier 3: aligning the photogrammetry point cloud to the SMPL mesh via ICP gives you a geometry source that was never involved in any of the self-calibration — that would be real, independent validation in a way nothing in the current pipeline provides.
+
+### Training / optimisation process in Phase 5
+
+First, an important framing point: this isn't "training" in the sense you'd use for a neural network learning from a big dataset. SMPL itself — the mapping from parameters (β, θ) to a 3D mesh — is a fixed, pre-learned model; nobody is updating its internal weights here. What Phase 5 does is closer to test-time optimisation (also called "analysis by synthesis" or "inverse rendering"): for this one scan, find the specific (β, θ, translation, scale) values that make SMPL's output match what the cameras actually observed. Same underlying machinery as neural net training (gradients, backprop, an optimiser), applied to a much smaller problem — fitting ~79 numbers to one example, not millions of weights to a dataset.
+
+**The computational graph, forward direction:**
+
+SMPL params (β, θ, translation, scale)
+   → SMPL forward pass (differentiable) → 3D joints/vertices
+   → project through each camera's fixed [R|t|K] → 2D pixel coordinates
+   → compare to observed data → loss (a single number)
+Backpropagation is just the chain rule run backwards through that graph: given the loss, compute ∂loss/∂β, ∂loss/∂θ, ∂loss/∂translation, ∂loss/∂scale — i.e., "if I nudge this parameter slightly, does the loss go up or down, and by how much." PyTorch builds the graph automatically as the forward pass runs, then .backward() walks it in reverse to get every gradient in one pass. The optimiser (Adam, per CLAUDE.md) then uses those gradients to actually update the parameters — a bit at a time, over many iterations, hopefully descending toward lower loss each step.
+
+The loss being minimised (from phase5_spec.md §6), the sum of four terms with per-stage weights:
+
+- L_joint — Huber distance between SMPL's own 3D joints and the triangulated 3D joints from Step 3 (DLT+RANSAC). "Does the body's 3D shape match the 3D points we reconstructed from multiple cameras?"
+- L_reproj (reprojection loss) — project SMPL's 3D joints through each camera into 2D, compare to the actual ViTPose 2D detection in that image, weighted by ViTPose's confidence, summed across all views. "Does the body, seen from every camera, land where the 2D detector actually saw it?"
+- L_pose_prior — penalises θ for straying from a plausible human pose. Pure regularisation — stops the optimiser exploiting a contorted pose to cheat the other losses.
+- L_shape_reg — penalises β for straying from the mean body shape. Same idea, for body shape.
+
+- Huber loss (used inside L_joint/L_reproj instead of plain squared error): behaves like L2 (squared error) for small residuals — smooth gradients, good behaviour — but switches to linear (L1-like) for large residuals. That means one badly-wrong point (a swapped rear-view keypoint) contributes a bounded amount of gradient instead of a squared, gradient-dominating amount. This is the direct fix for the "single outlier poisons everything" failure mode you were reading about in the supplement.
+
+- Loss-weight annealing — the w_joint/w_reproj/etc. coefficients change across the three stages (not the model, the loss recipe): Stage 1 uses almost only L_joint to get rough global position right fast; by Stage 3, w_joint has dropped to 0.1 and reprojection dominates, so the fine detail comes from the real 2D evidence rather than the (noisier) triangulated points. This is a curriculum, coarse-to-fine.
+
+- Iterations — each stage runs many steps of (forward pass → loss → backward pass → optimiser step), e.g. 50, 100, and up to 400 for the three stages. loss_history records the loss at each step; convergence.png plots it.
+
+### What is 6 DoF?
+
+Degrees of freedom — the number of independent numbers needed to fully describe something's position/configuration. For a rigid object in 3D space (like a camera), that's:
+
+3 for translation: where it is (x, y, z)
+
+3 for rotation: which way it's facing (commonly parameterised as roll/pitch/yaw, or a quaternion's effective 3 free parameters, or in this codebase axis-angle)
+= 6 total. 
+
+A camera's [R|t] — the exact thing Phase 4's PnP solves — is precisely this: R is a 3×3 matrix but constrained to be a valid rotation (orthonormal, determinant 1), so it only carries 3 free numbers; t is a plain 3-vector. Contrast this with a human body: SMPL's pose alone has ~72 numbers (24 joints × 3 axis-angle parameters each) plus shape and translation/scale on top — a vastly higher-dimensional, articulated thing, not a single rigid 6-DOF transform. That distinction is exactly why a single camera pose can absorb a rigid/coherent bias but can't absorb per-joint articulated error — which ties back to the drift question from before.
+
+### Clarifying the chain: is 3D refinement done via camera-pose refinement?
+
+Good instinct to double check this, but the current (shipped) pipeline does not work that way — and it's worth being precise here because it's easy to blend this with the abandoned PnP-refinement feature we discussed. The actual chain:
+
+- Phase 4 (once, upfront): solve each camera's [R|t] via PnP, using the original consensus 3D joints + 2D ViTPose keypoints. Cameras are now fixed — nothing after this point ever changes them again in the shipped pipeline.
+- Phase 5, triangulation (once, before the optimiser runs): using those fixed cameras + the 2D keypoints, compute fresh 3D joint positions via multi-view DLT+RANSAC — this is a separate geometric computation from the earlier consensus joints, purely intersecting 2D rays through known camera positions.
+- Phase 5, SMPL refinement (the iterative, gradient-descent part): adjust the SMPL body's parameters (β, θ, translation, scale) — not the cameras — so that the body matches (a) the triangulated 3D joints from step 2, and (b) the 2D ViTPose detections when reprojected through the (still-fixed) cameras.
+
+So to directly answer: the thing being refined is the SMPL body, not the camera poses. Camera-pose refinement from 2D correspondences is exactly what the abandoned "Option A+B" feature tried to bolt on afterward (re-solving PnP using the refined SMPL joints to nudge the cameras) — and that's the piece that got reverted because it let cameras absorb SMPL error instead of correcting real drift.
+
+**As for reprojection's role — it's actually both of the things you asked about, just at different times:**
+
+- During optimisation, L_reproj is one of the two active loss terms directly driving gradient descent — it's not a passive check, it's baked into what backprop computes gradients from at every single step. It's steering the fit.
+- After optimisation finishes, the exact same computation (project the final refined joints, compare to the 2D detections) is reused as a reported quality metric (median_reproj_px in Phase5Result.metrics) — in that role, yes, it's verification: "how well did the fit turn out."
+What it never does in the current pipeline is verify or adjust the camera's pose — the camera is a fixed input throughout Phase 5, not something reprojection error ever feeds back into.
+
+### Disproven: Use of PnP RANSAC and Justification for "Option A+B"
 
 The PnP log shows per-camera reprojection at 37-72 px. This is essentially the ViTPoser noise floor. Compared to the Phase 5 median of 137 px, the gap is ~80 px of camera calibraiton drift that COLMAP+Procrustes can't fix:
 

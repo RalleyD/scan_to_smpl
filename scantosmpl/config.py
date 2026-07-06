@@ -122,9 +122,6 @@ class FittingConfig:
 class Phase5Config:
     """Phase 5: Multi-view triangulation + SMPL refinement configuration."""
 
-    extrinsics_source: Literal["colmap", "self_calibration"] = "colmap"
-    colmap_model_dir: Path | None = None
-
     # Triangulation
     # min ViTPose confidence to include a view
     triangulation_conf_threshold: float = 0.3
@@ -133,13 +130,11 @@ class Phase5Config:
     ransac_reproj_threshold: float = 100.0
     ransac_iterations: int = 100
 
-    # Frame alignment
-    min_alignment_joints: int = 4               # min joints required for Procrustes
-
     # Refinement
     # Median Absolute Deviation (MAD) threshold for outlier view rejection
-    # this alows for some tolerance to noise (e.g side views) while rejecting views with high reprojectction error
-    # e.g. rear views with misdetections due to occlusion.
+    # this alows for some tolerance to noise (e.g side views) while rejecting
+    # views with high reprojectction error e.g. rear views with misdetections
+    # due to occlusion.
     reprojection_mad_multiplier: float = 3.0
 
     # Debug

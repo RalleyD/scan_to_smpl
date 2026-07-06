@@ -2,7 +2,6 @@
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -13,9 +12,9 @@ from scantosmpl.fitting.losses import (
     reprojection_loss,
     shape_regularisation,
 )
+from scantosmpl.fitting.rear_views import classify_rear_views
 from scantosmpl.hmr.consensus import ConsensusResult
 from scantosmpl.smpl.model import SMPLModel
-from scantosmpl.smpl.joint_map import Smpl24Joint
 from scantosmpl.utils.geometry import compute_pa_mpjpe
 
 logger = logging.getLogger(__name__)
@@ -107,37 +106,12 @@ class SMPLOptimiser:
         self.coco_to_smpl = coco_to_smpl
         self.device = smpl_model.device
 
-    def _classify_rear_views(self,
-                             consensus: ConsensusResult,
-                             cameras: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
-                             ) -> set[str]:
-
-        # left shoulder at +X
-        shoulder_vec = consensus.joints[Smpl24Joint.LEFT_SHOULDER] - \
-            consensus.joints[Smpl24Joint.RIGHT_SHOULDER]
-        up_vec = consensus.joints[Smpl24Joint.NECK] - \
-            consensus.joints[Smpl24Joint.PELVIS]
-        # should be -Z for rear view, +Z for front view
-        # order is important for -Z: up_vec, shoulder_vec
-        body_back_vec = np.cross(up_vec, shoulder_vec)
-
-        # in case the body pose is undeterminate, normalise the front vector to avoid classifying all vectors as rear
-        norm = np.linalg.norm(body_back_vec)
-        if norm < 1e-6:
-            return set()
-        body_back_vec = body_back_vec / norm
-
-        rear_views = []
-        for name, (R, t, K) in cameras.items():
-            cam_centre = -R.T @ t
-            cam_offset = cam_centre - consensus.joints[Smpl24Joint.PELVIS]
-            cam_dot = np.dot(cam_offset, body_back_vec)
-            if cam_dot > 0:
-                rear_views.append(name)
-
-        logger.info("Rear views detected: %s", rear_views)
-
-        return set(rear_views)
+    def _classify_rear_views(
+        self,
+        consensus: ConsensusResult,
+        cameras: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    ) -> set[str]:
+        return classify_rear_views(consensus, cameras)
 
     def refine(
         self,

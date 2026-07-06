@@ -157,10 +157,16 @@ class CalibrationPipeline:
                     correspondence_type=result.correspondence_type,
                 )
 
-            # Store extrinsics in view
+            # Store extrinsics in view. Also persist the principal point used
+            # to solve PnP (get_intrinsics_for_view substitutes the image
+            # center when the placeholder (0,0) is set) — otherwise a later
+            # consumer reading view.camera.K rebuilds K from the stale (0,0)
+            # placeholder, silently mismatching the K these R,t were solved
+            # against.
             if result.success and view.camera is not None:
                 view.camera.rotation = result.rotation
                 view.camera.translation = result.translation
+                view.camera.principal_point = (K[0, 2], K[1, 2])
 
             pnp_results[name] = result
             status = "OK" if result.success else "FAIL"
