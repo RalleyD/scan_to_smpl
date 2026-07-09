@@ -32,11 +32,10 @@ class Phase5Result:
     triangulated_joints: np.ndarray
     # (24, 3) mapped to SMPL joint ordering (zeros for unmapped)
     triangulated_joints_smpl: np.ndarray
-    triangulation_quality: np.ndarray       # (J,) inlier fraction
+    triangulation_quality: np.ndarray  # (J,) inlier fraction
     # (J,) mean reprojection error (px)
     triangulation_reproj_errors: np.ndarray
-    cameras_smpl_frame: dict[str, tuple[np.ndarray,
-                                        np.ndarray, np.ndarray]]  # R, t, K
+    cameras_smpl_frame: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]  # R, t, K
     metrics: dict[str, float] = field(default_factory=dict)
 
 
@@ -102,7 +101,8 @@ class Phase5Pipeline:
 
         logger.info(
             "Loaded extrinsics for %d/%d views from self-calibration",
-            len(cameras_smpl), len(views),
+            len(cameras_smpl),
+            len(views),
         )
 
         # -------------------------------------------------------------------
@@ -121,14 +121,9 @@ class Phase5Pipeline:
         ext_kp_indices = [idx for idx, _ in joint_indices]
 
         # Build cameras dict for triangulation (COCO-indexed views only)
-        tri_cameras = {
-            name: cam
-            for name, cam in cameras_smpl.items()
-            if name in kp2d_per_view
-        }
+        tri_cameras = {name: cam for name, cam in cameras_smpl.items() if name in kp2d_per_view}
         # Build midpoint-expanded keypoints and confs
-        kp2d_full, confs_full = self._expand_midpoints(
-            kp2d_per_view, confs_per_view)
+        kp2d_full, confs_full = self._expand_midpoints(kp2d_per_view, confs_per_view)
 
         pts_3d, quality, reproj_errors = ransac_triangulate_joints(
             keypoints_per_view=kp2d_full,
@@ -144,9 +139,9 @@ class Phase5Pipeline:
         n_good = int((quality > 0).sum())
         logger.info(
             "Triangulation: %d/%d joints successful, mean reproj=%.1fpx",
-            n_good, len(joint_indices),
-            float(reproj_errors[quality > 0].mean()
-                  ) if n_good > 0 else float("nan"),
+            n_good,
+            len(joint_indices),
+            float(reproj_errors[quality > 0].mean()) if n_good > 0 else float("nan"),
         )
 
         # -------------------------------------------------------------------
@@ -155,17 +150,10 @@ class Phase5Pipeline:
         optimiser = SMPLOptimiser(self.smpl, COCO_TO_SMPL)
 
         # Map triangulated joints to SMPL joint indices for L_joint
-        triang_smpl = self._map_triangulated_to_smpl_joints(
-            pts_3d, joint_indices)
+        triang_smpl = self._map_triangulated_to_smpl_joints(pts_3d, joint_indices)
 
-        kp2d_tensors = {
-            k: np.array(v) for k, v in kp2d_per_view.items()
-            if k in cameras_smpl
-        }
-        confs_tensors = {
-            k: np.array(v) for k, v in confs_per_view.items()
-            if k in cameras_smpl
-        }
+        kp2d_tensors = {k: np.array(v) for k, v in kp2d_per_view.items() if k in cameras_smpl}
+        confs_tensors = {k: np.array(v) for k, v in confs_per_view.items() if k in cameras_smpl}
 
         refined = optimiser.refine(
             consensus=consensus,
@@ -193,9 +181,18 @@ class Phase5Pipeline:
         # -------------------------------------------------------------------
         if debug_dir is not None:
             self._save_debug(
-                debug_dir, refined, pts_3d, quality, reproj_errors,
-                joint_indices, cameras_smpl, metrics,
-                image_dir, kp2d_per_view, confs_per_view, views,
+                debug_dir,
+                refined,
+                pts_3d,
+                quality,
+                reproj_errors,
+                joint_indices,
+                cameras_smpl,
+                metrics,
+                image_dir,
+                kp2d_per_view,
+                confs_per_view,
+                views,
             )
 
         return Phase5Result(
@@ -344,10 +341,13 @@ class Phase5Pipeline:
     ) -> dict[str, float]:
         valid = np.linalg.norm(triang_smpl, axis=1) > 1e-6
         if valid.sum() >= 2:
-            pa_mpjpe = compute_pa_mpjpe(
-                refined.joints[valid],
-                triang_smpl[valid],
-            ) * 1000
+            pa_mpjpe = (
+                compute_pa_mpjpe(
+                    refined.joints[valid],
+                    triang_smpl[valid],
+                )
+                * 1000
+            )
         else:
             pa_mpjpe = float("nan")
 
@@ -362,23 +362,18 @@ class Phase5Pipeline:
             for coco_idx, smpl_idx in COCO_TO_SMPL.items():
                 if c[coco_idx] < 0.3:
                     continue
-                proj = project_points(
-                    refined.joints[smpl_idx:smpl_idx+1], R, t, K
-                )[0]
+                proj = project_points(refined.joints[smpl_idx : smpl_idx + 1], R, t, K)[0]
                 err = float(np.linalg.norm(proj - kps[coco_idx]))
                 per_view_reproj[name].append(err)
 
         reproj_errors = [e for errs in per_view_reproj.values() for e in errs]
 
-        median_reproj = float(np.median(reproj_errors)
-                              ) if reproj_errors else float("nan")
-        mean_reproj = float(np.mean(reproj_errors)
-                            ) if reproj_errors else float("nan")
+        median_reproj = float(np.median(reproj_errors)) if reproj_errors else float("nan")
+        mean_reproj = float(np.mean(reproj_errors)) if reproj_errors else float("nan")
 
         # compute per-view means
         per_view_means = {
-            name: float(np.mean(errs))
-            if errs else float("nan")
+            name: float(np.mean(errs)) if errs else float("nan")
             for name, errs in per_view_reproj.items()
         }
         # using per-view means, compute median of these means - this provides the center
@@ -387,11 +382,7 @@ class Phase5Pipeline:
         # means to get a robust measure of reprojection consistency across views
         # this provides outlier threhsold
         mad_of_means = float(
-            np.median(
-                np.abs(
-                    np.array(list(per_view_means.values())) - median_of_means
-                )
-            )
+            np.median(np.abs(np.array(list(per_view_means.values())) - median_of_means))
         )
         # the median spread threshold is resistant to outliers, so if a few views
         # have very high reprojection error, they won't skew the threshold as much
@@ -399,7 +390,8 @@ class Phase5Pipeline:
         # threshold of the median + 3*MAD (a common choice for outlier detection,
         # roughly analogous to 3 standard deviations in a normal distribution).
         inlier_view_means = [
-            mean for mean in per_view_means.values()
+            mean
+            for mean in per_view_means.values()
             if mean <= median_of_means + (self.cfg.reprojection_mad_multiplier * mad_of_means)
         ]
         n_outlier_view = len(per_view_means) - len(inlier_view_means)
@@ -443,8 +435,7 @@ class Phase5Pipeline:
                 "position": pts_3d[j_out].tolist(),
                 "quality": float(quality[j_out]),
                 "reproj_error_px": (
-                    float(reproj_errors[j_out])
-                    if reproj_errors[j_out] < 1e9 else None
+                    float(reproj_errors[j_out]) if reproj_errors[j_out] < 1e9 else None
                 ),
             }
         with open(debug_dir / "triangulated_joints.json", "w") as f:
@@ -459,12 +450,25 @@ class Phase5Pipeline:
             "scale": refined.scale,
             "metrics": refined.metrics,
             "cameras": {
-                name: {"R": R.tolist(), "t": t.tolist()}
-                for name, (R, t, _) in cameras.items()
+                # K is the corrected intrinsic matrix these R,t were solved
+                # against (Phase 4's principal-point fix) — persisted so a
+                # downstream reader never has to rebuild K from Phase 1's
+                # pre-correction detections.json and silently mismatch it.
+                name: {"R": R.tolist(), "t": t.tolist(), "K": K.tolist()}
+                for name, (R, t, K) in cameras.items()
             },
         }
         with open(debug_dir / "refinement_results.json", "w") as f:
             json.dump(result_data, f, indent=2)
+
+        # refined_mesh.obj — mirrors Tier 1's consensus_mesh.obj so downstream
+        # tools (e.g. scantosmpl.evaluation.visualise) can compare tiers without
+        # re-running the SMPL forward pass.
+        self._save_obj(
+            refined.vertices,
+            self.smpl.body_model.faces,
+            debug_dir / "refined_mesh.obj",
+        )
 
         # summary.txt
         lines = [
@@ -475,8 +479,7 @@ class Phase5Pipeline:
             f"Triangulated joints: {int((quality > 0).sum())}/{len(joint_indices)}",
             "",
             "Acceptance Criteria:",
-            f"  mean reproj <15px: "
-            f"{'PASS' if metrics.get('mean_reproj_px', 999) < 15 else 'FAIL'}",
+            f"  mean reproj <15px: {'PASS' if metrics.get('mean_reproj_px', 999) < 15 else 'FAIL'}",
             "",
             "Loss history (final loss per stage):",
         ]
@@ -529,6 +532,7 @@ class Phase5Pipeline:
         cameras: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
     ) -> None:
         from scantosmpl.utils.geometry import camera_center
+
         centers = {n: camera_center(R, t) for n, (R, t, _) in cameras.items()}
         if not centers:
             return
@@ -551,6 +555,17 @@ class Phase5Pipeline:
         fig.tight_layout()
         fig.savefig(debug_dir / "camera_positions.png", dpi=100)
         plt.close(fig)
+
+    @staticmethod
+    def _save_obj(vertices: np.ndarray, faces: np.ndarray, path: Path) -> None:
+        """Write a simple Wavefront .obj file."""
+        with open(path, "w") as f:
+            f.write("# ScanToSMPL Tier 2 refined mesh\n")
+            for v in vertices:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            for face in faces:
+                # OBJ is 1-indexed
+                f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
 
     def _save_reprojection_overlays(
         self,
@@ -596,13 +611,15 @@ class Phase5Pipeline:
                 # Project refined SMPL joints directly — cameras and keypoints
                 # are already in the same (EXIF-upright) frame the image displays.
                 for smpl_idx in range(min(24, len(refined.joints))):
-                    proj = project_points(
-                        refined.joints[smpl_idx:smpl_idx+1], R, t, K
-                    )[0] * scale_f
+                    proj = (
+                        project_points(refined.joints[smpl_idx : smpl_idx + 1], R, t, K)[0]
+                        * scale_f
+                    )
                     x, y = int(proj[0]), int(proj[1])
                     if 0 <= x < w and 0 <= y < h:
-                        draw.ellipse([x-4, y-4, x+4, y+4],
-                                     fill=(0, 200, 0), outline=(0, 200, 0))
+                        draw.ellipse(
+                            [x - 4, y - 4, x + 4, y + 4], fill=(0, 200, 0), outline=(0, 200, 0)
+                        )
 
                 # Draw ViTPose detections
                 if name in kp2d and name in confs:
@@ -613,7 +630,10 @@ class Phase5Pipeline:
                         x, y = int(kp_scaled[0]), int(kp_scaled[1])
                         if 0 <= x < w and 0 <= y < h:
                             draw.ellipse(
-                                [x-3, y-3, x+3, y+3], fill=(255, 100, 0), outline=(255, 100, 0))
+                                [x - 3, y - 3, x + 3, y + 3],
+                                fill=(255, 100, 0),
+                                outline=(255, 100, 0),
+                            )
 
                 img.save(overlay_dir / f"{name}_overlay.jpg")
             except Exception as exc:
