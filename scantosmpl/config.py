@@ -137,6 +137,24 @@ class Phase5Config:
     # due to occlusion.
     reprojection_mad_multiplier: float = 3.0
 
+    # Graded view-angle weighting (W3). classify_view_angles grades each camera
+    # frontal / three_quarter / profile / rear; the reprojection loss scales
+    # each view's terms by the weight for its grade. Profile views carry
+    # systematic ViTPose error, so they are down-weighted (not hard-excluded);
+    # rear views are excluded entirely (weight 0) — consistent with the existing
+    # classify_rear_views exclusion. Frontal/three-quarter stay at full weight.
+    view_angle_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "frontal": 1.0,
+            "three_quarter": 1.0,
+            "profile": 0.3,
+            "rear": 0.0,
+        }
+    )
+    # Cosine boundaries for classify_view_angles (see its docstring).
+    view_angle_profile_cos: float = 0.35
+    view_angle_three_quarter_cos: float = 0.85
+
     # Debug
     save_debug: bool = True
     debug_dir: Path = Path("output/debug/refinement")

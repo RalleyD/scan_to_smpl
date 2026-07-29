@@ -52,6 +52,24 @@ COCO_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
     (5, 6): 12,    # mid(left_shoulder, right_shoulder) -> neck
 }
 
+# Head correspondence for the reprojection loss (W2 — head-protrusion fix).
+#
+# The SMPL head joint (15) otherwise carries *no* data term: COCO_TO_SMPL omits
+# the face keypoints (nose/eyes/ears, COCO 0-4), so head orientation was
+# inherited from consensus and nudged only by the weak pose prior — hence the
+# head visibly protruding forward in front-view overlays.
+#
+# We use the EARS MIDPOINT (COCO 3=left_ear, 4=right_ear), NOT the nose (COCO 0).
+# The nose is anterior to the head centre, so a nose->head(15) term would pull
+# the head *forward* — the exact defect we are fixing. The ears midpoint sits
+# laterally centred on the head, close to where the SMPL head joint lives, so it
+# constrains head position/orientation without a systematic forward bias.
+# This mapping is validated against a frontal view before being trusted (see the
+# W2 verification note in docs/phase5_tier2_improvement_plan.md).
+HEAD_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
+    (3, 4): 15,    # mid(left_ear, right_ear) -> head
+}
+
 # Number of directly mappable joints (excluding midpoints)
 NUM_DIRECT_CORRESPONDENCES = len(COCO_TO_SMPL)  # 12
 

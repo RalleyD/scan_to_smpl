@@ -12,8 +12,9 @@ from scantosmpl.fitting.losses import (
     reprojection_loss,
     shape_regularisation,
 )
-from scantosmpl.fitting.rear_views import classify_rear_views
+from scantosmpl.fitting.rear_views import classify_rear_views, classify_view_angles
 from scantosmpl.hmr.consensus import ConsensusResult
+from scantosmpl.smpl.joint_map import HEAD_MIDPOINT_TO_SMPL
 from scantosmpl.smpl.model import SMPLModel
 from scantosmpl.utils.geometry import compute_pa_mpjpe
 
@@ -97,13 +98,40 @@ class SMPLOptimiser:
     the final stage, mitigating DLT triangulation noise.
     """
 
+    # Default graded weights / boundaries mirror Phase5Config; kept here so the
+    # optimiser is usable standalone. The pipeline threads the config values in.
+    DEFAULT_VIEW_ANGLE_WEIGHTS: dict[str, float] = {
+        "frontal": 1.0,
+        "three_quarter": 1.0,
+        "profile": 0.3,
+        "rear": 0.0,
+    }
+
     def __init__(
         self,
         smpl_model: SMPLModel,
         coco_to_smpl: dict[int, int],
+        midpoint_to_smpl: dict[tuple[int, int], int] | None = None,
+        view_angle_weights: dict[str, float] | None = None,
+        view_angle_profile_cos: float = 0.35,
+        view_angle_three_quarter_cos: float = 0.85,
     ) -> None:
         self.smpl = smpl_model
         self.coco_to_smpl = coco_to_smpl
+        # Ears-midpoint -> head(15) by default (W2). Kept configurable so tests
+        # can disable the head term or swap the correspondence.
+        self.midpoint_to_smpl = (
+            HEAD_MIDPOINT_TO_SMPL if midpoint_to_smpl is None else midpoint_to_smpl
+        )
+        # Graded view-angle weights (W3): scale each view's reprojection terms by
+        # its angle grade; rear stays at 0.0 (hard-excluded, as before).
+        self.view_angle_weights = (
+            dict(self.DEFAULT_VIEW_ANGLE_WEIGHTS)
+            if view_angle_weights is None
+            else view_angle_weights
+        )
+        self.view_angle_profile_cos = view_angle_profile_cos
+        self.view_angle_three_quarter_cos = view_angle_three_quarter_cos
         self.device = smpl_model.device
 
     def _classify_rear_views(
@@ -138,11 +166,35 @@ class SMPLOptimiser:
         if stages is None:
             stages = DEFAULT_STAGES
 
-        rear_views = self._classify_rear_views(consensus, cameras)
+        # Graded view-angle weighting (W3). Each camera is graded frontal /
+        # three_quarter / profile / rear; its reprojection terms are scaled by
+        # the configured weight for that grade. Rear (weight 0.0 by default) is
+        # dropped from the camera set entirely — identical to the previous
+        # binary rear-exclusion — while profile views are merely down-weighted
+        # instead of being kept at full strength.
+        view_angles = classify_view_angles(
+            consensus,
+            cameras,
+            profile_cos=self.view_angle_profile_cos,
+            three_quarter_cos=self.view_angle_three_quarter_cos,
+        )
+        view_weights = {
+            name: self.view_angle_weights.get(angle, 1.0)
+            for name, angle in view_angles.items()
+        }
+        # Cameras with weight 0 (rear) never contribute, so drop them up front —
+        # keeps the tensor set small and matches the historical exclusion.
         front_cameras = {
             cam: mat for cam, mat in cameras.items()
-            if cam not in rear_views
+            if view_weights.get(cam, 1.0) > 0.0
         }
+        n_by_angle: dict[str, int] = {}
+        for angle in view_angles.values():
+            n_by_angle[angle] = n_by_angle.get(angle, 0) + 1
+        logger.info(
+            "View-angle grades: %s | kept %d/%d cameras (rear excluded)",
+            n_by_angle, len(front_cameras), len(cameras),
+        )
 
         # Initialise SMPL params from consensus
         self.smpl.set_params(
@@ -210,6 +262,8 @@ class SMPLOptimiser:
                         conf_tensors,
                         cam_tensors,
                         self.coco_to_smpl,
+                        view_weights=view_weights,
+                        midpoint_to_smpl=self.midpoint_to_smpl,
                     )
                     loss = loss + stage.w_reproj * lr
 

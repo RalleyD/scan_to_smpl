@@ -81,16 +81,19 @@ def _render_mesh_overlay(
     pts_2d = pts_h[:, :2] / (pts_h[:, 2:3] + 1e-9)
 
     f = np.asarray(faces)
-    all_front = (v_z[f[:, 0]] > 0.01) & (v_z[f[:, 1]] > 0.01) & (v_z[f[:, 2]] > 0.01)
+    all_front = (v_z[f[:, 0]] > 0.01) & (
+        v_z[f[:, 1]] > 0.01) & (v_z[f[:, 2]] > 0.01)
     vis_faces = f[all_front]
 
-    v0, v1, v2 = pts_2d[vis_faces[:, 0]], pts_2d[vis_faces[:, 1]], pts_2d[vis_faces[:, 2]]
+    v0, v1, v2 = pts_2d[vis_faces[:, 0]
+                        ], pts_2d[vis_faces[:, 1]], pts_2d[vis_faces[:, 2]]
     cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - (v1[:, 1] - v0[:, 1]) * (
         v2[:, 0] - v0[:, 0]
     )
     vis_faces = vis_faces[cross > 0]
 
-    z_cent = (v_z[vis_faces[:, 0]] + v_z[vis_faces[:, 1]] + v_z[vis_faces[:, 2]]) / 3.0
+    z_cent = (v_z[vis_faces[:, 0]] + v_z[vis_faces[:, 1]] +
+              v_z[vis_faces[:, 2]]) / 3.0
     vis_faces = vis_faces[np.argsort(z_cent)[::-1]]
 
     base = image.convert("RGBA")
@@ -159,8 +162,10 @@ def render_tier_comparison(
         raise ValueError(f"{view_name} not found in {hmr_results_path}")
     view_hmr = hmr_results[view_name]
 
-    consensus_results = json.load(open(consensus_debug_dir / "consensus_results.json"))
-    refinement_results = json.load(open(refinement_debug_dir / "refinement_results.json"))
+    consensus_results = json.load(
+        open(consensus_debug_dir / "consensus_results.json"))
+    refinement_results = json.load(
+        open(refinement_debug_dir / "refinement_results.json"))
 
     cam2 = refinement_results["cameras"].get(view_name)
     if cam2 is None:
@@ -181,28 +186,36 @@ def render_tier_comparison(
     # global_orient (no shared world frame in Tier 1), assumed image-centre K
     # — exactly scantosmpl.hmr.consensus._render_consensus_overlay's approach.
     W, H = image.size
-    K_tier1 = np.array([[f_px, 0.0, W / 2.0], [0.0, f_px, H / 2.0], [0.0, 0.0, 1.0]])
+    K_tier1 = np.array(
+        [[f_px, 0.0, W / 2.0], [0.0, f_px, H / 2.0], [0.0, 0.0, 1.0]])
     with torch.no_grad():
         out = smpl(
-            global_orient=torch.tensor(view_hmr["global_orient"]).float().unsqueeze(0),
-            body_pose=torch.tensor(consensus_results["body_pose"]).float().unsqueeze(0),
-            betas=torch.tensor(consensus_results["betas"]).float().unsqueeze(0),
+            global_orient=torch.tensor(
+                view_hmr["global_orient"]).float().unsqueeze(0),
+            body_pose=torch.tensor(
+                consensus_results["body_pose"]).float().unsqueeze(0),
+            betas=torch.tensor(
+                consensus_results["betas"]).float().unsqueeze(0),
         )
-    verts_tier1 = out.vertices[0].numpy() + np.array(view_hmr["cam_translation"])
-    tier1_img = _render_mesh_overlay(image, verts_tier1, faces, K_tier1, TIER1_FILL, TIER1_EDGE)
+    verts_tier1 = out.vertices[0].numpy(
+    ) + np.array(view_hmr["cam_translation"])
+    tier1_img = _render_mesh_overlay(
+        image, verts_tier1, faces, K_tier1, TIER1_FILL, TIER1_EDGE)
 
     # --- Tier 2: refined mesh (already world/SMPL-frame), through the actual
     # self-calibrated camera [R|t|K] (K includes Phase 4's principal-point fix).
     R = np.array(cam2["R"])
     t = np.array(cam2["t"])
     K_tier2 = np.array(cam2["K"])
-    tier2_mesh = trimesh.load(str(refinement_debug_dir / "refined_mesh.obj"), process=False)
+    tier2_mesh = trimesh.load(
+        str(refinement_debug_dir / "refined_mesh.obj"), process=False)
     # trimesh.load()'s return type covers Scene/PointCloud too; a single-object
     # .obj with faces always loads as Trimesh, which does have `.vertices`.
     assert isinstance(tier2_mesh, trimesh.Trimesh)
     verts_world = np.asarray(tier2_mesh.vertices)
     verts_tier2 = (R @ verts_world.T).T + t
-    tier2_img = _render_mesh_overlay(image, verts_tier2, faces, K_tier2, TIER2_FILL, TIER2_EDGE)
+    tier2_img = _render_mesh_overlay(
+        image, verts_tier2, faces, K_tier2, TIER2_FILL, TIER2_EDGE)
 
     # --- assemble side by side ---
     scale = 900.0 / H
@@ -212,10 +225,12 @@ def render_tier_comparison(
         _label(tier2_img, "Tier 2 - refined"),
     ]
     panels = [
-        p.resize((int(p.width * scale), int(p.height * scale)), Image.Resampling.LANCZOS)
+        p.resize((int(p.width * scale), int(p.height * scale)),
+                 Image.Resampling.LANCZOS)
         for p in panels
     ]
-    combined = Image.new("RGB", (sum(p.width for p in panels), panels[0].height))
+    combined = Image.new(
+        "RGB", (sum(p.width for p in panels), panels[0].height))
     x = 0
     for p in panels:
         combined.paste(p, (x, 0))
@@ -223,23 +238,32 @@ def render_tier_comparison(
     return combined
 
 
+def list_of_strs(arg: str):
+    return [a.strip() for a in arg.split(',')]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--views",
-        nargs="*",
+        # nargs="*",
+        type=list_of_strs,
         default=DEFAULT_VIEWS,
         help="View filenames to render (default: the two views the Tier 1 "
         "consensus summary itself flags as worst-fitting)",
     )
     parser.add_argument("--image-dir", type=Path, default=DEFAULT_IMAGE_DIR)
     parser.add_argument("--detections", type=Path, default=DEFAULT_DETECTIONS)
-    parser.add_argument("--hmr-results", type=Path, default=DEFAULT_HMR_RESULTS)
-    parser.add_argument("--consensus-dir", type=Path, default=DEFAULT_CONSENSUS_DIR)
-    parser.add_argument("--refinement-dir", type=Path, default=DEFAULT_REFINEMENT_DIR)
+    parser.add_argument("--hmr-results", type=Path,
+                        default=DEFAULT_HMR_RESULTS)
+    parser.add_argument("--consensus-dir", type=Path,
+                        default=DEFAULT_CONSENSUS_DIR)
+    parser.add_argument("--refinement-dir", type=Path,
+                        default=DEFAULT_REFINEMENT_DIR)
     parser.add_argument("--smpl-model", type=Path, default=DEFAULT_SMPL_MODEL)
     parser.add_argument("--gender", default="neutral")
-    parser.add_argument("--output-dir", type=Path, default=Path("output/debug/tier_comparison"))
+    parser.add_argument("--output-dir", type=Path,
+                        default=Path("output/debug/tier_comparison"))
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

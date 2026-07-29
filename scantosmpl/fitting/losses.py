@@ -45,6 +45,8 @@ def reprojection_loss(
     cameras: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     coco_to_smpl: dict[int, int],
     huber_delta: float = 20.0,
+    view_weights: dict[str, float] | None = None,
+    midpoint_to_smpl: dict[tuple[int, int], int] | None = None,
 ) -> torch.Tensor:
     """Confidence-weighted multi-view reprojection loss with Huber robustness.
 
@@ -58,6 +60,17 @@ def reprojection_loss(
         cameras: {view_name: (R, t, K)} each a tuple of (3,3), (3,), (3,3) tensors.
         coco_to_smpl: Mapping from COCO keypoint index to SMPL joint index.
         huber_delta: Huber delta (pixels).
+        view_weights: Optional {view_name: weight} graded per-view multiplier
+            (W3). A view's every term is scaled by its weight (default 1.0), so
+            profile views — whose ViTPose keypoints carry systematic error — can
+            be down-weighted without hard exclusion. Terms are still normalised
+            by the *unweighted* count so a global down-weight lowers the loss
+            (and its gradient) rather than being cancelled by the mean.
+        midpoint_to_smpl: Optional {(coco_a, coco_b): smpl_idx} correspondences
+            projected against the *midpoint* of two COCO 2D keypoints, weighted
+            by the min of the pair's confidences (matching how derived joints
+            such as pelvis/neck are triangulated). Used for the ears-midpoint ->
+            head(15) term (W2) so head orientation gains a data constraint.
 
     Returns:
         Scalar loss tensor (mean over all views and keypoints).
@@ -70,6 +83,10 @@ def reprojection_loss(
 
     for view_name, (R, t, K) in cameras.items():
         if view_name not in keypoints_2d:
+            continue
+
+        vw = 1.0 if view_weights is None else view_weights.get(view_name, 1.0)
+        if vw <= 0.0:
             continue
 
         R = R.to(device)
@@ -99,8 +116,26 @@ def reprojection_loss(
             obs = kp2d[coco_idx]          # (2,)
             err = torch.norm(proj - obs)  # scalar pixel error
             huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
-            total_loss = total_loss + w * huber
+            total_loss = total_loss + vw * w * huber
             n_terms += 1
+
+        # Midpoint correspondences (e.g. ears-midpoint -> head): compare the
+        # projected SMPL joint against the 2D midpoint of a COCO pair, weighted
+        # by the min of the pair's confidences.
+        if midpoint_to_smpl is not None:
+            for (a, b), smpl_idx in midpoint_to_smpl.items():
+                if a >= kp2d.shape[0] or b >= kp2d.shape[0]:
+                    continue
+                w = torch.minimum(conf[a], conf[b])
+                if w < 0.1:  # skip near-zero confidence on either endpoint
+                    continue
+
+                proj = pts_img[smpl_idx]              # (2,)
+                obs = (kp2d[a] + kp2d[b]) / 2.0        # (2,)
+                err = torch.norm(proj - obs)
+                huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
+                total_loss = total_loss + vw * w * huber
+                n_terms += 1
 
     if n_terms == 0:
         return torch.tensor(0.0, device=device)
