@@ -47,6 +47,8 @@ def reprojection_loss(
     huber_delta: float = 20.0,
     view_weights: dict[str, float] | None = None,
     midpoint_to_smpl: dict[tuple[int, int], int] | None = None,
+    vertices_pred: torch.Tensor | None = None,
+    vertex_midpoint_to_smpl: dict[tuple[int, int], tuple[int, int]] | None = None,
 ) -> torch.Tensor:
     """Confidence-weighted multi-view reprojection loss with Huber robustness.
 
@@ -69,14 +71,27 @@ def reprojection_loss(
         midpoint_to_smpl: Optional {(coco_a, coco_b): smpl_idx} correspondences
             projected against the *midpoint* of two COCO 2D keypoints, weighted
             by the min of the pair's confidences (matching how derived joints
-            such as pelvis/neck are triangulated). Used for the ears-midpoint ->
-            head(15) term (W2) so head orientation gains a data constraint.
+            such as pelvis/neck are triangulated). Joint-anchored; superseded for
+            the head term by ``vertex_midpoint_to_smpl`` (joint 15 is biased —
+            see joint_map.HEAD_MIDPOINT_TO_SMPL).
+        vertices_pred: Optional (1, V, 3) or (V, 3) SMPL vertices, required to use
+            ``vertex_midpoint_to_smpl``. Must be in the same world frame as
+            ``joints_pred`` (i.e. scaled/posed identically).
+        vertex_midpoint_to_smpl: Optional {(coco_a, coco_b): (vert_l, vert_r)}
+            correspondences matching the 2D midpoint of a COCO pair to the
+            projection of the 3D midpoint of two SMPL *vertices*. Used for the
+            fixed ears-midpoint head term (W2): the ear vertices rotate with the
+            head, so this constrains head orientation without the joint-15
+            vertical/depth bias.
 
     Returns:
         Scalar loss tensor (mean over all views and keypoints).
     """
     device = joints_pred.device
     pred_joints = joints_pred.squeeze(0)  # (J_smpl, 3)
+    verts = None
+    if vertices_pred is not None:
+        verts = (vertices_pred.squeeze(0) if vertices_pred.dim() == 3 else vertices_pred).to(device)
 
     total_loss = torch.tensor(0.0, device=device)
     n_terms = 0
@@ -132,6 +147,28 @@ def reprojection_loss(
 
                 proj = pts_img[smpl_idx]              # (2,)
                 obs = (kp2d[a] + kp2d[b]) / 2.0        # (2,)
+                err = torch.norm(proj - obs)
+                huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
+                total_loss = total_loss + vw * w * huber
+                n_terms += 1
+
+        # Vertex-anchored midpoint correspondences (fixed head term): compare the
+        # 2D midpoint of a COCO pair against the *projection of the 3D midpoint of
+        # two SMPL vertices*. Unlike the joint version above, the anchor moves
+        # with the head, so there is no joint-15 vertical/depth bias.
+        if vertex_midpoint_to_smpl is not None and verts is not None:
+            for (a, b), (vl, vr) in vertex_midpoint_to_smpl.items():
+                if a >= kp2d.shape[0] or b >= kp2d.shape[0]:
+                    continue
+                w = torch.minimum(conf[a], conf[b])
+                if w < 0.1:  # skip near-zero confidence on either endpoint
+                    continue
+
+                p3d = 0.5 * (verts[vl] + verts[vr])       # (3,) world-space
+                p_cam = R @ p3d + t                        # (3,)
+                p_h = K @ p_cam                            # (3,)
+                proj = p_h[:2] / p_h[2:3].clamp(min=1e-6)  # (2,)
+                obs = (kp2d[a] + kp2d[b]) / 2.0            # (2,)
                 err = torch.norm(proj - obs)
                 huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
                 total_loss = total_loss + vw * w * huber

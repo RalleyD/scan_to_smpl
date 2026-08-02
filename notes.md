@@ -417,6 +417,19 @@ So to directly answer: the thing being refined is the SMPL body, not the camera 
 - After optimisation finishes, the exact same computation (project the final refined joints, compare to the 2D detections) is reused as a reported quality metric (median_reproj_px in Phase5Result.metrics) — in that role, yes, it's verification: "how well did the fit turn out."
 What it never does in the current pipeline is verify or adjust the camera's pose — the camera is a fixed input throughout Phase 5, not something reprojection error ever feeds back into.
 
+**A note on the results - summary.txt and pytest**
+
+summary.txt is legacy. This could be patched to include the summary from pytest.
+
+The pytest integration suite will capture detailed metrics like median joint reprojection error in pixels.
+
+These are captured in `refinement_results.json`
+
+Reprojection quality: median=77.09px, mean_inliers=214.28px
+
+Also in refinement_results.json's metrics dict — median_reproj_px: 77.09.
+
+
 ### Disproven: Use of PnP RANSAC and Justification for "Option A+B"
 
 The PnP log shows per-camera reprojection at 37-72 px. This is essentially the ViTPoser noise floor. Compared to the Phase 5 median of 137 px, the gap is ~80 px of camera calibraiton drift that COLMAP+Procrustes can't fix:
@@ -516,6 +529,197 @@ Cameras therefore, get small and plausible adjustments that abosrb COLMAP to ViT
 **The caveat:**
 
 PnP is improving the reprojection metric by each camera absorbing error to satisfy the metric. Given the scenario: giving PnP enough freedom that it fits the camera to whatever 3D joints are present, even if those joints are wrong. The reprojection becomes artificially good but the cameras have moved out of their true positions. This requires a guard i.e `pnp_refine_max_translation_m: 0.1` - bounding how far cameras can drift from their COLMAP-derived [R|t] - keeping the translation honest.
+
+---
+
+## Phase 5 - tier 2 - improvement plan
+
+**integration tests**:
+
+```
+.venv/bin/python -m pytest tests/integration/test_phase5_integration.py -v -m gpu
+```
+
+**rear view classification**
+
+```
+.venv/bin/python -m pytest tests/test_rear_views.py -v
+```
+
+**visualise refinement comparison - head and torso alignment**
+
+
+```
+.venv/bin/python -m scantosmpl.evaluation.visualise --views cam01_2.JPG,cam10_2.JPG,cam10_5.JPG
+```
+
+**leave one view out - diagnostic**
+
+```
+.venv/bin/python -m scantosmpl.evaluation.leave_one_view_out
+```
+
+### results
+
+are profile views the culprit?
+Not profiles as a class — two specific broken profile views. Your LOVO table is the evidence. The key column is the gap (held-out minus in-sample):
+
+view	angle	in-sample	held-out	gap	read
+cam06_4	profile	324	328	4.5	fit can't explain it, doesn't rely on it → genuine outlier
+cam02_5	profile	157	172	15	poorly explained, low influence → weak outlier
+cam02_4	profile	51	53	2.2	well explained, well behaved → good view
+cam01_6	three_quarter	58	99	41	big gap = influential, the fit leans on it → keep
+So: cam02_4 is a profile and one of your best views (51px). cam06_4 is a profile and a broken one (324px — a genuine ViTPose failure / left-right swap). A small gap + high absolute error = "the geometry disagrees with every other camera no matter what," which is the LOVO diagnostic's whole reason to exist.
+
+That means my blanket W3 rule (profile → 0.3) is too blunt in both directions: it muzzles the good profile (cam02_4) while the two broken ones still leak in at 0.3× (huber-capped, so contained, but not silenced). The plan actually anticipated this — the optional W3 bullet was "per-term gross-outlier rejection (drop > N px)." Your data now argues that the per-view outlier drop matters more than the angle-class weight.
+
+Your two visual defects, decomposed
+Thin torso — this is the deferred Tier-3 girth gap, exactly as the plan predicted. Joint losses only constrain joint centres; nothing constrains girth, so betas wander. Two caveats worth knowing:
+
+The flip you saw (original overspill/wider → now thinner) just confirms girth is unconstrained and drifting run-to-run — not a Tier-2 bug, and no Tier-2 knob fixes it properly. It needs the chamfer anchor.
+There's also a metric artifact feeding this: profile (side) views are the only ones constraining torso front-back depth. Down-weighting them (W3) removes depth-position constraint, which can read as a thinner/shallower torso in a side overlay even though the frontal fit is fine.
+Chest sits higher — this one is more likely tied to my W2 head term. Anchoring head(15) to the ViTPose ears-midpoint, if the detected ears sit a little high, pulls the head up and drags the upper spine/neck with it through the pose prior. This is a fit effect, not girth, and it's the thing I'd want to A/B before trusting.
+
+The one test failure — honest read
+test_triangulation_accuracy failed on PA-MPJPE 24.78mm vs the <24.5mm bar — 0.28mm over a deliberately tight threshold. Everything else passed (median reproj 80.6px < 90 ✓). I won't paper over it by loosening the threshold. Two things are tangled and I don't want to guess which dominates:
+
+Metric artifact: that PA-MPJPE is measured against triangulated joints, and triangulation uses all views (profiles included). Down-weighting profiles in refinement moves the fit away from the profile-inclusive triangulation → this specific number can go up even if the fit against the real body is no worse.
+A real perturbation from W2/W3 shifting the solution.
+I can separate these cleanly and cheaply — a refit-only A/B runs off the cached debug artifacts (like the LOVO script), ~14s per config, no GPU HMR re-run.
+
+"Depth" is two different quantities
+1. Surface depth = girth / sagittal thickness (belly-to-back distance).
+You're exactly right here. A joint centre sits on the body's medial axis; the surface is offset from it by the soft-tissue radius. Joint reprojection never observes that radius — from any view, profile or frontal. So no joint term refines girth. The "thin torso" is unreachable in Tier 2 and is a pure chamfer/Tier-3 job. Agreed, full stop.
+
+2. Skeletal depth = the sagittal (front-back) position of the joint centres = posture / lean.
+This one is observable from joints, and profile views are its strongest input. Geometry: a frontal camera (looking down the body's front-back axis) pins each joint's left-right X and up-down Y but is weak on front-back Z — that's along its optical axis. A profile camera pins Y and Z but is weak on X. So the front-back placement of the head, neck, and spine — i.e. the "head protrudes forward" / "chest forward" family — is precisely what profile (and, partially, three-quarter) views constrain. Frontal views alone can't.
+
+So:
+
+quantity	observable from joints?	who constrains it	your defect
+torso girth (surface thickness)	no	chamfer only → Tier 3	"thin torso"
+joint sagittal position (posture/lean)	yes	profile + 3/4 views	"head/chest forward"
+The implication for your question
+"Refining depth out" is the wrong move if it means dropping profiles wholesale — you'd lose the posture/lean constraint (which is the head-forward defect W2 is trying to fix) while doing nothing for girth (which was never on the table for joints). The thing that's broken in cam06_4 isn't "profile-ness" — it's that its keypoints are wrong (324px, detector failure). The good profile cam02_4 (51px) carries genuinely useful sagittal-depth signal you want to keep.
+
+That's the argument for targeted outlier rejection over my current blanket profile → 0.3: reject broken keypoints, not profile geometry.
+
+One nuance that partly defuses the whole worry
+Profile depth info isn't actually thrown away by W3 anyway. Triangulation uses all views at full weight (including profiles) to build the 3D joint targets; W3 only re-weights the 2D reprojection term in the final refinement. So the profile-derived sagittal positions are already baked into the joint targets the optimiser fits toward — W3 just changes how much the last-stage reprojection additionally trusts profile keypoints.
+
+What this means for the A/B
+It's still worth running — but recalibrate what it can explain:
+
+Chest-height + PA-MPJPE: yes, the A/B will cleanly attribute these to W2 (head term) vs W3 (weighting). Worth doing.
+Torso thinness: the A/B will not explain it. Girth is betas-driven and only weakly regularised, so a "torso-width" column would mostly show run-to-run RANSAC/beta wander, not a W2/W3 effect. I'd be misleading you if I sold the A/B as diagnosing the thinness — that's Tier-3, and no Tier-2 knob moves it honestly.
+So my read: your instinct is right on girth (Tier-3), but don't generalize it to "profiles are useless" — good profiles are the only thing pinning posture/lean, which is a different defect that Tier 2 genuinely owns.
+
+Given that, do you want me to still run the A/B (now scoped to chest-height + PA-MPJPE attribution only, torso-width dropped), or skip straight to targeted outlier rejection since the reasoning already favors keeping good profiles and dropping broken-keypoint ones?
+
+   ```
+   .venv/bin/python -m scantosmpl.evaluation.ab_refit
+   ```
+
+Don't demote to W3. Fix W2's anchor so it corrects head-forward without the upward overshoot: match the 2D ears-midpoint to the reprojection of the 3D ear-vertex midpoint (which rotates with the head) instead of to joint 15. That removes the systematic lift, should pull head_up/pitch back toward baseline, and should shrink the PA-MPJPE cost too.
+
+Concretely I'd:
+
+Verify the bias first — compute the 3D offset (ear-vertex midpoint − joint 15) on the SMPL template; I expect ~+several cm in the up axis. That confirms the mechanism before we touch code. (Needs a model load — one small script you'd run.)
+Implement vertex-anchoring — extend reprojection_loss to accept vertex-index correspondences (project SMPL vertices, not just joints), and point the head term at the ear-vertex midpoint.
+That keeps the head fix you asked for, kills the "back and up" artifact, and likely gets PA-MPJPE back under threshold on its own merits.
+
+### verification - A/B working off cached artifcats (JSON output etc)
+
+On the neutral SMPL template, the ears-midpoint vertex sits +6.7 cm above and −3.0 cm behind head joint 15 (tests/test_head_anchor.py::test_ear_vertex_sits_above_and_behind_head_joint, passing). The old W2 term matched the 2D ears to the projection of joint 15, so satisfying it necessarily lifts and tilts the head back — the "up and back" you saw in cam10_2. The earlier validation missed this because it only checked the fore-aft (Z) and lateral (X) axes, never the vertical.
+
+The 2D ears-midpoint now anchors to the projection of the 3D ear-vertex midpoint (verts 583/4071), which rotates with the head, so there's no joint-15 bias.
+
+joint_map.py — HEAD_MIDPOINT_TO_VERTEX + ear-vertex ids; old HEAD_MIDPOINT_TO_SMPL kept only for the A/B baseline.
+losses.py — reprojection_loss gained vertices_pred + vertex_midpoint_to_smpl (projects the vertex midpoint; existing joint path untouched).
+optimiser.py — vertex head term is now the default; joint anchor off by default.
+
+
+config	PA-MPJPE	medReproj	head_up Δ	head_pitch Δ
+baseline (no head)	22.56	71.0	—	—
+W2_joint (old, biased)	25.00	74.9	+2.02 cm	−17.8°
+W2_vertex (new fix)	22.87	69.8	+0.99 cm	−2.7°
+W2v_W3 (fix + profile 0.3)	23.55	71.9	+0.92 cm	−1.3°
+
+The fix cuts the PA-MPJPE cost from +2.44 mm → +0.31 mm, turns the reprojection penalty into a small improvement (−1.2 px), and collapses the head over-rotation from −17.8° to −2.7°.
+
+End-to-end (the real thing): re-ran the full pipeline (fresh HMR → consensus → cold PnP → refine) with the new default. The previously-failing AC7 test now passes: Refinement PA-MPJPE = 23.55 mm < 24.5 mm, and it matches the A/B's W2v_W3 prediction to the decimal — good evidence the A/B is faithful.
+
+**to verify**
+
+1 - The new head correction is gentle — it moves head_pitch only 21.8° → 19.1°, versus the old term's violent → 4.0°. That's the point (no overshoot), but the scalars can't tell us whether 19.1° actually looks right against the ground truth. The cam10_2 overlay you flagged was rendered under the old joint-anchored term, so the fix should visibly help — but I'd suggest regenerating the tier_comparison overlays to confirm the head sits correctly now. 
+2 - W3 (profile 0.3) is a small net negative here — W2_vertex alone (22.87, 69.8 px) beats W2v_W3 (23.55, 71.9 px). The current shipped default is W2v_W3. This lines up with the earlier LOVO finding that blanket profile down-weighting is too blunt. I did not change W3 — that's your call: relax the profile weight back toward 1.0, or do the targeted per-view rejection (cam06_4/cam02_5) we discussed.
+
+---
+
+## The case for targeted per-view reprojection
+
+the key finding for the cam10_2 question, straight from the cached LOVO diagnostic:
+
+view	angle	in-sample px	held-out px	outlier?
+cam06_4	profile	324	329	YES
+cam02_5	profile	158	173	YES
+cam04_4	frontal	96	101	no
+cam10_2	frontal	75	87	no
+cam02_4	profile	51	53	no
+
+Two things jump out. First, cam10_2 is not an outlier — its reprojection is middling (75px) and it's a frontal view, so its head "tilt" isn't the fit being dragged around by cam10_2. Second, the two genuine outliers (cam06_4 at a broken 324px, cam02_5 at 158px) are both profiles — but so is the perfectly good cam02_4 (51px), which blanket-W3 needlessly suppresses too. That's exactly the case for targeted rejection.
+
+### However! The reality doesn't match
+
+The middling-frontal view of cam10_2 has been leading me astray with the head position...
+
+cam10_2 is not an outlier. The cached LOVO diagnostic has it at 75px in-sample, a middling frontal view — so its head isn't being dragged around by a bad camera in the fit. And the body-intrinsic head pitch is +19–21° bowed forward in 3D (a view-independent measurement in the body's own frame), i.e. the opposite of "tilted back." So the tilt you see is specific to how the model projects into that elevated front camera — a small error in cam10_2's recovered elevation rotates the whole projection, and the ear (high on the skull, far from the pelvis pivot) shows it most. That's a per-view camera effect, not a body-pose defect.
+
+The proof: no view-weighting config improves cam10_2 — they all make it worse (74 → 81px). Weighting changes the fitted body, but cam10_2's own recovered camera is fixed, so it can't fix that overlay. The lever for cam10_2 specifically is its Tier-2 PnP camera (or the head term, already fixed) — not weighting.
+
+**targeted rejection results**
+
+config	PA-MPJPE	medReproj	cam10_2	cam02_4 (good profile)
+W2_vertex (no weighting)	22.87	69.8	74.0	67.1
+W2v_W3 (blanket profile ×0.3, shipped)	23.55	71.9	77.0	59.6
+W2v_tgtDown (cam06_4+cam02_5 ×0.3)	24.00	73.4	81.2	54.2
+W2v_tgtDrop (cam06_4+cam02_5 dropped)	24.78	76.4	81.1	53.6
+
+Suppressing profiles makes PA-MPJPE monotonically worse, and targeted rejection is worse than the blanket W3 it was meant to replace. Why: those two "outlier" profiles are load-bearing for depth — the frontal/three-quarter views barely constrain front-back position, so the profiles' huge reprojection is profile-hardness + them fighting the frontals on depth, not garbage. Remove them and the fit drifts in depth. Worse still, dropping cam02_5/cam06_4 while keeping cam02_4 at full weight unbalances the sagittal constraint (cam02_4 & cam02_5 are the same azimuth at two heights), which is why targeted beats out worse than symmetric blanket suppression. 
+
+the lesson:
+Profiles have to be weighted as a balanced set — you can't surgically thin them.
+
+W2_vertex is the way to go for now, and i've set this in the Phase5Config as a default.
+
+The last run to re-visualise these results...
+
+added --dump-config/--dump-dir to the A/B harness. It reuses the fast cached refit and the already-solved cameras (config-independent), so no full pipeline re-run — the whole thing took a few seconds on GPU:
+
+   ```
+   python -m scantosmpl.evaluation.ab_refit \
+    --dump-config W2_vertex --dump-dir output/debug/refinement_W2_vertex
+
+   python -m scantosmpl.evaluation.visualise \
+    --refinement-dir output/debug/refinement_W2_vertex \
+    --views cam10_2.JPG,cam01_2.JPG \
+    --output-dir output/debug/tier_comparison_W2_vertex
+
+   ```
+    Any config label from the A/B table (baseline, W2v_W3, W2v_tgtDrop, …) works with --dump-config.
+
+comparing them to the shipped W2v_W3: for cam10_2 the two Tier-2 overlays are visually identical — dropping profile weighting doesn't un-tilt the head. That's the picture matching the numbers (its own reprojection moves only 77→74px, head pitch stays ~+19° forward in 3D). It reconfirms cam10_2's backward-tilt is that elevated camera's projection, not a body defect no weighting can touch.
+
+**Shipped: W2_vertex**
+
+"W2_vertex" is two ingredients, and the pipeline already had the second one baked in:
+
+No profile down-weight → view_angle_weights profile 0.3 → 1.0. ✅ You've done this.
+Vertex head anchor (2D ears → ear-vertex midpoint, not biased joint 15). This is already the pipeline default: pipeline.py:150-157 constructs SMPLOptimiser without passing midpoint_to_smpl/vertex_midpoint_to_smpl, so the optimiser defaults apply — joint anchor OFF ({}), vertex anchor ON (optimiser.py:131). That's the "W2v" half, shipped since the earlier head-anchor fix.
+
+view_name_weights staying empty matches the A/B's _NO_NAME. So the pipeline now runs exactly the W2_vertex configuration.
+
+One caveat on the number, not the config: the 22.87mm came from the A/B harness, which fits off cached triangulated joints + PnP cameras (deterministic, for clean attribution). A full end-to-end run re-triangulates, re-solves PnP, and applies the pipeline's MAD outlier-view rejection — so the absolute PA-MPJPE on a fresh run may drift a little from 22.87. The config change is correct and complete; just re-run the full pipeline once and glance at metrics.json / the AC7 check to confirm the shipped number on live artifacts.
 
 ---
 

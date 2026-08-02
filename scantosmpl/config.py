@@ -137,23 +137,49 @@ class Phase5Config:
     # due to occlusion.
     reprojection_mad_multiplier: float = 3.0
 
-    # Graded view-angle weighting (W3). classify_view_angles grades each camera
+    # Graded view-angle weighting (W3 - 0.3 profile).
+    # classify_view_angles grades each camera
     # frontal / three_quarter / profile / rear; the reprojection loss scales
     # each view's terms by the weight for its grade. Profile views carry
     # systematic ViTPose error, so they are down-weighted (not hard-excluded);
     # rear views are excluded entirely (weight 0) — consistent with the existing
     # classify_rear_views exclusion. Frontal/three-quarter stay at full weight.
+    # opting for W2_vertex for best results on the current t-pose scan.
     view_angle_weights: dict[str, float] = field(
         default_factory=lambda: {
             "frontal": 1.0,
             "three_quarter": 1.0,
-            "profile": 0.3,
+            "profile": 1.0,
             "rear": 0.0,
         }
     )
     # Cosine boundaries for classify_view_angles (see its docstring).
     view_angle_profile_cos: float = 0.35
     view_angle_three_quarter_cos: float = 0.85
+
+    # Per-view-NAME weight override (OPT-IN targeted rejection). Layered on top of
+    # the angle-class weights above and keyed by image filename stem, e.g.
+    # {"cam06_4": 0.0}. Empty by default — leave it empty unless a specific camera
+    # is genuinely *broken*. Down-weighting a merely-hard view HURTS the fit: the
+    # A/B (scantosmpl.evaluation.ab_refit) showed that suppressing hard-but-honest
+    # profile views raises PA-MPJPE, because profiles are load-bearing for sagittal
+    # (front-back) depth that the frontal/three-quarter views barely constrain.
+    #
+    # What counts as "broken" — a view whose 2D keypoints the fitted body CANNOT
+    # explain no matter how it poses (not one that is merely hard, e.g. a
+    # self-occluded profile or a foreshortened limb):
+    #   * ViTPose left/right limb swap, or the wrong subject detected in that frame
+    #     (reflection, mannequin, a second person);
+    #   * a mislabeled / duplicated camera whose recovered extrinsics point the
+    #     wrong way;
+    #   * gross motion blur or truncation making the keypoints meaningless.
+    # Diagnostic: scantosmpl.evaluation.leave_one_view_out flags a broken view as a
+    # candidate_outlier — its LEAVE-ONE-OUT reprojection stays >2x the cohort
+    # median AND its in-sample error is already high (the fit can't satisfy it even
+    # held in). A hard-but-honest view has high error yet still constrains geometry
+    # the frontals can't see — do NOT reject it. Set 0.0 to drop a view, a fraction
+    # to down-weight. See README "Penalising bad datasets / broken views".
+    view_name_weights: dict[str, float] = field(default_factory=dict)
 
     # Debug
     save_debug: bool = True

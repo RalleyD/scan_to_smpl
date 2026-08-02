@@ -14,7 +14,7 @@ from scantosmpl.fitting.losses import (
 )
 from scantosmpl.fitting.rear_views import classify_rear_views, classify_view_angles
 from scantosmpl.hmr.consensus import ConsensusResult
-from scantosmpl.smpl.joint_map import HEAD_MIDPOINT_TO_SMPL
+from scantosmpl.smpl.joint_map import HEAD_MIDPOINT_TO_VERTEX
 from scantosmpl.smpl.model import SMPLModel
 from scantosmpl.utils.geometry import compute_pa_mpjpe
 
@@ -112,16 +112,23 @@ class SMPLOptimiser:
         smpl_model: SMPLModel,
         coco_to_smpl: dict[int, int],
         midpoint_to_smpl: dict[tuple[int, int], int] | None = None,
+        vertex_midpoint_to_smpl: dict[tuple[int, int], tuple[int, int]] | None = None,
         view_angle_weights: dict[str, float] | None = None,
+        view_name_weights: dict[str, float] | None = None,
         view_angle_profile_cos: float = 0.35,
         view_angle_three_quarter_cos: float = 0.85,
     ) -> None:
         self.smpl = smpl_model
         self.coco_to_smpl = coco_to_smpl
-        # Ears-midpoint -> head(15) by default (W2). Kept configurable so tests
-        # can disable the head term or swap the correspondence.
-        self.midpoint_to_smpl = (
-            HEAD_MIDPOINT_TO_SMPL if midpoint_to_smpl is None else midpoint_to_smpl
+        # Joint-anchored derived-joint terms (pelvis/neck style). OFF by default —
+        # the head term now goes through the vertex-anchored path below, which has
+        # no joint-15 bias. Pass an explicit map (e.g. HEAD_MIDPOINT_TO_SMPL) to
+        # re-enable the old joint-anchored head term (used by the ab_refit A/B).
+        self.midpoint_to_smpl = {} if midpoint_to_smpl is None else midpoint_to_smpl
+        # Ears-midpoint -> ear-vertices midpoint (W2, fixed). Configurable so tests
+        # / the A/B can disable it ({}) or swap the correspondence.
+        self.vertex_midpoint_to_smpl = (
+            HEAD_MIDPOINT_TO_VERTEX if vertex_midpoint_to_smpl is None else vertex_midpoint_to_smpl
         )
         # Graded view-angle weights (W3): scale each view's reprojection terms by
         # its angle grade; rear stays at 0.0 (hard-excluded, as before).
@@ -130,6 +137,15 @@ class SMPLOptimiser:
             if view_angle_weights is None
             else view_angle_weights
         )
+        # Per-view-NAME weight overrides (targeted outlier rejection). Layered on
+        # top of the angle-class weights above, so a single camera whose 2D
+        # keypoints are unexplainable (detector failure / left-right swap /
+        # mislabeled camera — e.g. a profile at 300+px reprojection) can be
+        # down-weighted or dropped (weight 0.0) WITHOUT penalising its whole angle
+        # class (the blunt W3 blanket also hits the good profiles). Keyed by
+        # filename stem; empty = no override (default). Feeds off the LOVO
+        # candidate_outlier diagnostic, not an in-sample subset search.
+        self.view_name_weights = {} if view_name_weights is None else view_name_weights
         self.view_angle_profile_cos = view_angle_profile_cos
         self.view_angle_three_quarter_cos = view_angle_three_quarter_cos
         self.device = smpl_model.device
@@ -182,6 +198,17 @@ class SMPLOptimiser:
             name: self.view_angle_weights.get(angle, 1.0)
             for name, angle in view_angles.items()
         }
+        # Apply per-view-name overrides (targeted rejection) AFTER the class
+        # weights so a named camera wins over its angle grade. Matched on the
+        # filename stem so "cam06_4" overrides "cam06_4.JPG". A 0.0 override drops
+        # the camera entirely via the front_cameras filter below (same path as
+        # rear exclusion); a fractional value merely down-weights it.
+        if self.view_name_weights:
+            overrides = {k.rsplit(".", 1)[0]: v for k, v in self.view_name_weights.items()}
+            for name in view_weights:
+                stem = name.rsplit(".", 1)[0]
+                if stem in overrides:
+                    view_weights[name] = overrides[stem]
         # Cameras with weight 0 (rear) never contribute, so drop them up front —
         # keeps the tensor set small and matches the historical exclusion.
         front_cameras = {
@@ -264,6 +291,8 @@ class SMPLOptimiser:
                         self.coco_to_smpl,
                         view_weights=view_weights,
                         midpoint_to_smpl=self.midpoint_to_smpl,
+                        vertices_pred=output.vertices,
+                        vertex_midpoint_to_smpl=self.vertex_midpoint_to_smpl,
                     )
                     loss = loss + stage.w_reproj * lr
 

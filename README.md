@@ -159,6 +159,66 @@ Outputs written to `--output`:
 
 ---
 
+## Penalising bad datasets / broken views
+
+Tier 2 fits the SMPL body by reprojecting it into every non-rear camera. Two knobs
+control how much each view is trusted — use them for messy datasets, but sparingly:
+in our reference scan **both blanket and targeted down-weighting cost accuracy**,
+because the "hard" views turned out to be load-bearing (see the caveat below).
+
+| Knob (`Phase5Config`) | Scope | Use for |
+|-----------------------|-------|---------|
+| `view_angle_weights` | Per angle-**class** (frontal / three_quarter / profile / rear) | A dataset where a whole class is systematically unreliable (e.g. every profile has bad keypoints). Default: `profile: 0.3`, `rear: 0.0`. |
+| `view_name_weights` | Per **camera** (filename stem, e.g. `{"cam06_4": 0.0}`) | A single genuinely-broken camera, without penalising its whole class. Default: empty (off). |
+
+`0.0` drops a view entirely (same path as rear exclusion); a fraction down-weights it.
+
+### What is a "broken" view?
+
+A view is **broken** only if the fitted body *cannot* explain its 2D keypoints no
+matter how it poses — not one that is merely *hard*:
+
+- ViTPose **left/right limb swap**, or the wrong subject detected in that frame
+  (reflection, mannequin, a second person);
+- a **mislabeled / duplicated camera** whose recovered extrinsics point the wrong way;
+- **gross motion blur or truncation** making the keypoints meaningless.
+
+**Diagnose before rejecting.** `python -m scantosmpl.evaluation.leave_one_view_out`
+flags a broken view as a `candidate_outlier`: its leave-one-out reprojection stays
+**> 2× the cohort median** *and* its in-sample error is already high — i.e. the fit
+can't satisfy it even when it's held in.
+
+> **Caveat — hard ≠ broken.** A self-occluded profile has high reprojection error
+> but still constrains **sagittal (front-back) depth** that the frontal and
+> three-quarter views barely see. Down-weighting such a view removes a real
+> constraint and makes the overall fit *worse*. In our reference scan, both the
+> blanket `profile: 0.3` and surgically dropping the two highest-error profiles
+> raised PA-MPJPE versus trusting all views equally. Only reject a view you have
+> confirmed is broken, and prefer weighting profiles as a **balanced set** rather
+> than thinning them asymmetrically. Reproduce with
+> `python -m scantosmpl.evaluation.ab_refit`.
+
+### Previewing a weighting choice
+
+The A/B harness can dump a chosen config's fitted mesh so you can eyeball its
+Tier-2 overlays without re-running the full pipeline (it reuses cached Tier-1
+artefacts and the already-solved cameras):
+
+```bash
+# refit all A/B configs from cache; dump the "W2_vertex" (no view weighting) fit
+python -m scantosmpl.evaluation.ab_refit \
+    --dump-config W2_vertex --dump-dir output/debug/refinement_W2_vertex
+
+# render [photo | Tier 1 | Tier 2] overlays for that fit
+# (--views takes full image filenames, including the extension)
+python -m scantosmpl.evaluation.visualise \
+    --refinement-dir output/debug/refinement_W2_vertex \
+    --views cam10_2.JPG,cam01_2.JPG \
+    --output-dir output/debug/tier_comparison_W2_vertex
+```
+
+---
+
 ## Development
 
 ```bash
@@ -223,13 +283,11 @@ scantosmpl/
 | 2 | Per-view HMR — CameraHMR integration | ✅ |
 | **3** | **Multi-view consensus — Tier 1 complete** | ✅ |
 | 4 | PnP self-calibration | ✅ |
-| **5** | **Triangulation + SMPL refinement — Tier 2** | 🔲 |
+| **5** | **Triangulation + SMPL refinement — Tier 2** | ✅ |
 | 6 | Point cloud preprocessing + ICP alignment | 🔲 |
 | **7** | **Surface refinement — Tier 3** | 🔲 |
 | 8 | End-to-end pipeline + CLI | 🔲 |
 | 9 | Packaging + CI | 🔲 |
-
-See [REVIEW.md](REVIEW.md) for full acceptance criteria per phase.
 
 ---
 

@@ -151,6 +151,7 @@ class Phase5Pipeline:
             self.smpl,
             COCO_TO_SMPL,
             view_angle_weights=cfg.view_angle_weights,
+            view_name_weights=cfg.view_name_weights,
             view_angle_profile_cos=cfg.view_angle_profile_cos,
             view_angle_three_quarter_cos=cfg.view_angle_three_quarter_cos,
         )

@@ -34,7 +34,7 @@ dependencies = [
 kaolin = ["kaolin>=0.17"]
 viz = ["pyvista", "matplotlib"]
 vposer = ["human_body_prior"]
-dev = ["pytest", "ruff", "mypy", "piexif"]
+dev = ["pytest", "pytest-timeout", "ruff", "mypy", "piexif"]
 
 [project.scripts]
 scantosmpl = "scantosmpl.cli:main"

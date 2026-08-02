@@ -59,15 +59,30 @@ COCO_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
 # inherited from consensus and nudged only by the weak pose prior — hence the
 # head visibly protruding forward in front-view overlays.
 #
-# We use the EARS MIDPOINT (COCO 3=left_ear, 4=right_ear), NOT the nose (COCO 0).
-# The nose is anterior to the head centre, so a nose->head(15) term would pull
-# the head *forward* — the exact defect we are fixing. The ears midpoint sits
-# laterally centred on the head, close to where the SMPL head joint lives, so it
-# constrains head position/orientation without a systematic forward bias.
-# This mapping is validated against a frontal view before being trusted (see the
-# W2 verification note in docs/phase5_tier2_improvement_plan.md).
+# We use the EARS MIDPOINT (COCO 3=left_ear, 4=right_ear), NOT the nose (COCO 0):
+# the nose is ~+10cm anterior of the head, so a nose->head term would pull the
+# head *forward* — the exact defect we are fixing.
+#
+# SUPERSEDED (kept for the ab_refit A/B baseline). Anchoring the 2D ears-midpoint
+# to the *projection of head joint 15* is geometrically biased: on the neutral
+# template the ears-midpoint VERTEX sits +6.7cm ABOVE and -3.0cm BEHIND joint 15
+# (verified by scantosmpl/evaluation checks). Matching the 2D ears to joint 15
+# therefore lifts and tilts the head back — the "head up and back" overshoot
+# measured in the A/B refit (head_up +2cm, head_pitch -18deg, PA-MPJPE +2.4mm).
+# Use HEAD_MIDPOINT_TO_VERTEX below instead.
 HEAD_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
-    (3, 4): 15,    # mid(left_ear, right_ear) -> head
+    (3, 4): 15,    # mid(left_ear, right_ear) -> head joint (biased; see above)
+}
+
+# Vertex-anchored head correspondence (W2, fixed). The 2D ears-midpoint is matched
+# to the projection of the 3D EARS-MIDPOINT VERTEX rather than a joint. Those
+# vertices rotate WITH the head, so the term constrains head orientation without
+# the joint-15 vertical/depth bias above. Ear vertex ids are SMPL's (shared 6890
+# topology with SMPL-H) — smplx.vertex_ids['smplh']: lear=583, rear=4071.
+SMPL_LEFT_EAR_VERTEX = 583
+SMPL_RIGHT_EAR_VERTEX = 4071
+HEAD_MIDPOINT_TO_VERTEX: dict[tuple[int, int], tuple[int, int]] = {
+    (3, 4): (SMPL_LEFT_EAR_VERTEX, SMPL_RIGHT_EAR_VERTEX),  # 2D ear-mid -> 3D ear-mid vertex
 }
 
 # Number of directly mappable joints (excluding midpoints)
