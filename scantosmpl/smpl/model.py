@@ -49,7 +49,8 @@ class SMPLModel(nn.Module):
         if not model_dir.exists():
             raise FileNotFoundError(
                 f"Model directory not found: {model_dir}\n"
-                f"Download SMPL models from smpl-x.is.tue.mpg.de and place .pkl files in {model_dir}"
+                f"Download SMPL models from smpl-x.is.tue.mpg.de and place .pkl "
+                f"files in {model_dir}"
             )
 
         self.body_model = smplx.create(
@@ -62,14 +63,14 @@ class SMPLModel(nn.Module):
 
         # Optimisable parameters — initialised to neutral pose
         self.betas = nn.Parameter(torch.zeros(1, num_betas, device=self.device))
-        self.body_pose = nn.Parameter(torch.zeros(1, self.body_model.NUM_BODY_JOINTS * 3, device=self.device))
+        self.body_pose = nn.Parameter(
+            torch.zeros(1, self.body_model.NUM_BODY_JOINTS * 3, device=self.device)
+        )
         self.global_orient = nn.Parameter(torch.zeros(1, 3, device=self.device))
         self.translation = nn.Parameter(torch.zeros(1, 3, device=self.device))
         self.scale = nn.Parameter(torch.ones(1, device=self.device))
         # SMPL+D per-vertex displacement field, posed world frame, metres (Tier 3).
-        self.displacements = nn.Parameter(
-            torch.zeros(1, self.NUM_VERTICES, 3, device=self.device)
-        )
+        self.displacements = nn.Parameter(torch.zeros(1, self.NUM_VERTICES, 3, device=self.device))
 
     def forward(
         self,
@@ -124,7 +125,7 @@ class SMPLModel(nn.Module):
         )
 
         vertices = output.vertices * scale.unsqueeze(-1).unsqueeze(-1)
-        joints = output.joints[:, :self.NUM_JOINTS] * scale.unsqueeze(-1).unsqueeze(-1)
+        joints = output.joints[:, : self.NUM_JOINTS] * scale.unsqueeze(-1).unsqueeze(-1)
 
         if apply_displacements:
             disp = displacements if displacements is not None else self.displacements

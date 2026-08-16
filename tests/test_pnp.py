@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-
 # ---------------------------------------------------------------------------
 # Test 1: Intrinsic matrix construction
 # ---------------------------------------------------------------------------
@@ -100,22 +99,39 @@ def _make_synthetic_cube_scene(
         rng = np.random.default_rng(42)
 
     # 3D points: unit cube vertices + face centers
-    pts_3d = np.array([
-        [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
-        [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1],
-        [0, 0, -1], [0, 0, 1], [0, -1, 0], [0, 1, 0],
-        [-1, 0, 0], [1, 0, 0], [0, 0, 0],
-    ], dtype=np.float64)
+    pts_3d = np.array(
+        [
+            [-1, -1, -1],
+            [-1, -1, 1],
+            [-1, 1, -1],
+            [-1, 1, 1],
+            [1, -1, -1],
+            [1, -1, 1],
+            [1, 1, -1],
+            [1, 1, 1],
+            [0, 0, -1],
+            [0, 0, 1],
+            [0, -1, 0],
+            [0, 1, 0],
+            [-1, 0, 0],
+            [1, 0, 0],
+            [0, 0, 0],
+        ],
+        dtype=np.float64,
+    )
 
     # Ground-truth camera: looking at origin from z=10, slight rotation
     R_gt = Rotation.from_euler("xyz", [5, -10, 3], degrees=True).as_matrix()
     t_gt = np.array([0.5, -0.3, 10.0])
 
-    K = np.array([
-        [f, 0, img_w / 2.0],
-        [0, f, img_h / 2.0],
-        [0, 0, 1.0],
-    ], dtype=np.float64)
+    K = np.array(
+        [
+            [f, 0, img_w / 2.0],
+            [0, f, img_h / 2.0],
+            [0, 0, 1.0],
+        ],
+        dtype=np.float64,
+    )
 
     pts_2d = project_points(pts_3d, R_gt, t_gt, K)
     if noise_std > 0:
@@ -145,18 +161,14 @@ class TestPnPSolver:
         """PnP should handle moderate pixel noise (2px std)."""
         from scantosmpl.calibration.pnp_solver import PnPSolver
 
-        pts_3d, pts_2d, confs, K, R_gt, t_gt = _make_synthetic_cube_scene(
-            noise_std=2.0
-        )
+        pts_3d, pts_2d, confs, K, R_gt, t_gt = _make_synthetic_cube_scene(noise_std=2.0)
 
         solver = PnPSolver(min_inliers=6)
         result = solver.solve(pts_3d, pts_2d, confs, K)
 
         assert result.success
         # Rotation should be close (within ~1 degree)
-        angle_diff = np.linalg.norm(
-            Rotation.from_matrix(result.rotation @ R_gt.T).as_rotvec()
-        )
+        angle_diff = np.linalg.norm(Rotation.from_matrix(result.rotation @ R_gt.T).as_rotvec())
         assert angle_diff < np.radians(2.0)
         assert result.reprojection_error < 10.0
 
@@ -275,9 +287,7 @@ class TestCameraGeometry:
         centers = {}
         for i in range(8):
             angle = 2 * np.pi * i / 8
-            centers[f"cam{i}"] = np.array([
-                3.0 * np.cos(angle), 1.5, 3.0 * np.sin(angle)
-            ])
+            centers[f"cam{i}"] = np.array([3.0 * np.cos(angle), 1.5, 3.0 * np.sin(angle)])
 
         plausible, stats = pipeline._validate_geometry(centers)
         assert plausible

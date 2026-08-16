@@ -36,11 +36,14 @@ class CameraParams:
     def K(self) -> np.ndarray:
         """3x3 intrinsic matrix."""
         cx, cy = self.principal_point
-        return np.array([
-            [self.focal_length, 0, cx],
-            [0, self.focal_length, cy],
-            [0, 0, 1],
-        ], dtype=np.float64)
+        return np.array(
+            [
+                [self.focal_length, 0, cx],
+                [0, self.focal_length, cy],
+                [0, 0, 1],
+            ],
+            dtype=np.float64,
+        )
 
     @property
     def has_extrinsics(self) -> bool:

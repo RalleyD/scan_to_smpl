@@ -93,7 +93,9 @@ def consensus_result(hmr_views):
     builder = ConsensusBuilder(smpl_model, device="cuda")
     debug_dir = Path("output/debug/consensus")
     result = builder.build_consensus(
-        hmr_views, debug_dir=debug_dir, image_dir=DATA_DIR,
+        hmr_views,
+        debug_dir=debug_dir,
+        image_dir=DATA_DIR,
     )
     return result
 
@@ -161,7 +163,8 @@ class TestConsensusImprovement:
         from scantosmpl.types import ViewType
 
         valid = [
-            v for v in hmr_views
+            v
+            for v in hmr_views
             if v.betas is not None and v.hmr_suitable and v.view_type != ViewType.SKIP
         ]
         if len(valid) < 3:
@@ -201,10 +204,10 @@ class TestSO3Validity:
         for j in range(23):
             R = rotmats[j]
             det = float(np.linalg.det(R))
-            np.testing.assert_allclose(det, 1.0, atol=1e-5,
-                                       err_msg=f"Joint {j}: det={det}")
-            np.testing.assert_allclose(R.T @ R, np.eye(3), atol=1e-5,
-                                       err_msg=f"Joint {j}: not orthogonal")
+            np.testing.assert_allclose(det, 1.0, atol=1e-5, err_msg=f"Joint {j}: det={det}")
+            np.testing.assert_allclose(
+                R.T @ R, np.eye(3), atol=1e-5, err_msg=f"Joint {j}: not orthogonal"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -76,8 +76,7 @@ def clean_smpl_pkl(input_path: Path, output_path: Path) -> dict:
             data = pickle.load(f, encoding="latin1")
 
         clean = {
-            k: np.asarray(v).copy() if isinstance(v, np.ndarray) else v
-            for k, v in data.items()
+            k: np.asarray(v).copy() if isinstance(v, np.ndarray) else v for k, v in data.items()
         }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +130,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Clean SMPL .pkl files of Chumpy objects")
     parser.add_argument("input_dir", type=Path, help="Directory containing SMPL .pkl files")
-    parser.add_argument("--output", type=Path, default=None, help="Output directory (default: same as input)")
+    parser.add_argument(
+        "--output", type=Path, default=None, help="Output directory (default: same as input)"
+    )
     args = parser.parse_args()
 
     clean_directory(args.input_dir, args.output)

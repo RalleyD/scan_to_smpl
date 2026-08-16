@@ -9,9 +9,9 @@ import numpy as np
 class OrientationQuality:
     """Quality assessment of the predicted global orientation."""
 
-    score: float                  # Overall quality score in [0, 1]
-    is_upright: bool              # Person appears upright (nose above hips)
-    rotation_magnitude_ok: bool   # ||global_orient|| < 2π
+    score: float  # Overall quality score in [0, 1]
+    is_upright: bool  # Person appears upright (nose above hips)
+    rotation_magnitude_ok: bool  # ||global_orient|| < 2π
     warnings: list[str] = field(default_factory=list)
 
 

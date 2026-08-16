@@ -1,7 +1,7 @@
 """Multi-view consensus: fuse per-view HMR estimates into a single SMPL parameter set."""
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -20,22 +20,22 @@ from scantosmpl.utils.geometry import (
 class ConsensusResult:
     """Output from multi-view SMPL parameter consensus."""
 
-    betas: np.ndarray               # (10,) consensus shape
-    body_pose: np.ndarray           # (69,) consensus pose (axis-angle)
-    global_orient: np.ndarray       # (3,) canonical = [0, 0, 0]
+    betas: np.ndarray  # (10,) consensus shape
+    body_pose: np.ndarray  # (69,) consensus pose (axis-angle)
+    global_orient: np.ndarray  # (3,) canonical = [0, 0, 0]
 
     # Mesh from consensus params
-    vertices: np.ndarray            # (6890, 3) in canonical frame
-    joints: np.ndarray              # (24, 3) SMPL joints in canonical frame
-    faces: np.ndarray               # (13776, 3)
+    vertices: np.ndarray  # (6890, 3) in canonical frame
+    joints: np.ndarray  # (24, 3) SMPL joints in canonical frame
+    faces: np.ndarray  # (13776, 3)
 
     # Quality metrics
     pa_mpjpe_per_view: dict[str, float]  # view_name -> PA-MPJPE in mm
-    pa_mpjpe_mean: float                  # mean across views (criterion 3.6: < 50mm)
-    beta_std: np.ndarray                  # (10,) per-component std before aggregation
-    body_height_m: float                  # estimated height from consensus mesh
-    per_view_weights: dict[str, float]    # view_name -> confidence weight used
-    n_views_used: int                     # views after trimming
+    pa_mpjpe_mean: float  # mean across views (criterion 3.6: < 50mm)
+    beta_std: np.ndarray  # (10,) per-component std before aggregation
+    body_height_m: float  # estimated height from consensus mesh
+    per_view_weights: dict[str, float]  # view_name -> confidence weight used
+    n_views_used: int  # views after trimming
 
 
 class ConsensusBuilder:
@@ -64,14 +64,17 @@ class ConsensusBuilder:
     def _get_smpl(self):
         if self._smpl is None:
             import smplx
-            import torch
 
-            self._smpl = smplx.create(
-                self._smpl_model_path,
-                model_type="smpl",
-                gender=self._gender,
-                use_face_contour=False,
-            ).to(self.device).eval()
+            self._smpl = (
+                smplx.create(
+                    self._smpl_model_path,
+                    model_type="smpl",
+                    gender=self._gender,
+                    use_face_contour=False,
+                )
+                .to(self.device)
+                .eval()
+            )
         return self._smpl
 
     def build_consensus(
@@ -97,13 +100,12 @@ class ConsensusBuilder:
 
         # Filter to views with HMR output
         valid = [
-            v for v in views
+            v
+            for v in views
             if v.betas is not None and v.hmr_suitable and v.view_type != ViewType.SKIP
         ]
         if len(valid) < 2:
-            raise ValueError(
-                f"Need at least 2 valid HMR views for consensus, got {len(valid)}"
-            )
+            raise ValueError(f"Need at least 2 valid HMR views for consensus, got {len(valid)}")
 
         view_names = [v.image_path.name for v in valid]
         betas_list = [v.betas for v in valid]
@@ -128,7 +130,10 @@ class ConsensusBuilder:
         with torch.no_grad():
             smpl_out = smpl(
                 global_orient=torch.from_numpy(consensus_go).float().unsqueeze(0).to(self.device),
-                body_pose=torch.from_numpy(consensus_body_pose).float().unsqueeze(0).to(self.device),
+                body_pose=torch.from_numpy(consensus_body_pose)
+                .float()
+                .unsqueeze(0)
+                .to(self.device),
                 betas=torch.from_numpy(consensus_betas).float().unsqueeze(0).to(self.device),
             )
         vertices = smpl_out.vertices[0].cpu().numpy()  # (6890, 3)
@@ -141,7 +146,9 @@ class ConsensusBuilder:
         # Step 6: cross-view PA-MPJPE
         per_view_joints = self._compute_per_view_joints(valid)
         pa_mpjpe_per_view = self._compute_pa_mpjpe_all(
-            joints, per_view_joints, view_names,
+            joints,
+            per_view_joints,
+            view_names,
         )
         pa_mpjpe_mean = float(np.mean(list(pa_mpjpe_per_view.values())))
 
@@ -235,13 +242,13 @@ class ConsensusBuilder:
         weighted Frechet mean on SO(3), and converts back to axis-angle.
         Returns (69,) axis-angle.
         """
-        N = len(body_pose_list)
+        len(body_pose_list)
         poses = np.stack(body_pose_list, axis=0)  # (N, 69)
         consensus_pose = np.zeros(69, dtype=np.float64)
 
         for j in range(23):
             # Extract axis-angle for joint j across all views
-            joint_aa = poses[:, j * 3: (j + 1) * 3]  # (N, 3)
+            joint_aa = poses[:, j * 3 : (j + 1) * 3]  # (N, 3)
 
             # Convert to rotation matrices
             joint_rotmats = aa_to_rotmat(joint_aa)  # (N, 3, 3)
@@ -251,7 +258,7 @@ class ConsensusBuilder:
 
             # Convert back to axis-angle
             mean_aa = rotmat_to_aa(mean_rot.reshape(1, 3, 3))[0]  # (3,)
-            consensus_pose[j * 3: (j + 1) * 3] = mean_aa
+            consensus_pose[j * 3 : (j + 1) * 3] = mean_aa
 
         return consensus_pose
 
@@ -265,7 +272,8 @@ class ConsensusBuilder:
         return float(vertices[:, 1].max() - vertices[:, 1].min())
 
     def _compute_per_view_joints(
-        self, views: list[ViewResult],
+        self,
+        views: list[ViewResult],
     ) -> list[np.ndarray]:
         """Run SMPL forward pass per view with canonical global_orient to get joints."""
         import torch
@@ -332,7 +340,10 @@ class ConsensusBuilder:
         with torch.no_grad():
             out = smpl(
                 global_orient=torch.from_numpy(global_orient).float().unsqueeze(0).to(self.device),
-                body_pose=torch.from_numpy(consensus_body_pose).float().unsqueeze(0).to(self.device),
+                body_pose=torch.from_numpy(consensus_body_pose)
+                .float()
+                .unsqueeze(0)
+                .to(self.device),
                 betas=torch.from_numpy(consensus_betas).float().unsqueeze(0).to(self.device),
             )
         verts = out.vertices[0].cpu().numpy()  # (6890, 3)
@@ -342,11 +353,13 @@ class ConsensusBuilder:
         v_z = v[:, 2]
         W, H = image.size
 
-        K = np.array([
-            [focal_length_px, 0.0, W / 2.0],
-            [0.0, focal_length_px, H / 2.0],
-            [0.0, 0.0, 1.0],
-        ])
+        K = np.array(
+            [
+                [focal_length_px, 0.0, W / 2.0],
+                [0.0, focal_length_px, H / 2.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
 
         # Project
         pts_h = (K @ v.T).T
@@ -360,8 +373,9 @@ class ConsensusBuilder:
         v0 = pts_2d[vis_faces[:, 0]]
         v1 = pts_2d[vis_faces[:, 1]]
         v2 = pts_2d[vis_faces[:, 2]]
-        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) \
-              - (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - (v1[:, 1] - v0[:, 1]) * (
+            v2[:, 0] - v0[:, 0]
+        )
         vis_faces = vis_faces[cross > 0]
 
         z_cent = (v_z[vis_faces[:, 0]] + v_z[vis_faces[:, 1]] + v_z[vis_faces[:, 2]]) / 3.0
@@ -378,8 +392,10 @@ class ConsensusBuilder:
             p0 = (float(pts_2d[face[0], 0]), float(pts_2d[face[0], 1]))
             p1 = (float(pts_2d[face[1], 0]), float(pts_2d[face[1], 1]))
             p2 = (float(pts_2d[face[2], 0]), float(pts_2d[face[2], 1]))
-            if all(-margin <= p[0] <= W + margin and -margin <= p[1] <= H + margin
-                   for p in (p0, p1, p2)):
+            if all(
+                -margin <= p[0] <= W + margin and -margin <= p[1] <= H + margin
+                for p in (p0, p1, p2)
+            ):
                 draw.polygon([p0, p1, p2], fill=TEAL)
 
         # --- Edges: dark teal ---
@@ -407,7 +423,9 @@ class ConsensusBuilder:
     # ------------------------------------------------------------------
 
     def _select_frontal_views(
-        self, views: list[ViewResult], max_views: int = 3,
+        self,
+        views: list[ViewResult],
+        max_views: int = 3,
     ) -> list[ViewResult]:
         """
         Select the most frontal views based on shoulder spread ratio.
@@ -458,7 +476,8 @@ class ConsensusBuilder:
 
         # --- Mesh .obj ---
         self._save_obj(
-            result.vertices, result.faces,
+            result.vertices,
+            result.faces,
             debug_dir / "consensus_mesh.obj",
         )
 
@@ -478,16 +497,25 @@ class ConsensusBuilder:
                 image = loaded.image
 
                 go = v.global_orient
-                cam_t = v.camera.hmr_translation if v.camera and v.camera.hmr_translation is not None else None
+                cam_t = (
+                    v.camera.hmr_translation
+                    if v.camera and v.camera.hmr_translation is not None
+                    else None
+                )
                 fl = v.camera.focal_length if v.camera else None
                 if go is None or cam_t is None or fl is None:
                     continue
 
                 overlay_path = debug_dir / (v.image_path.stem + "_consensus_overlay.jpg")
                 self._render_consensus_overlay(
-                    image, result.vertices, result.faces,
-                    go, cam_t, fl,
-                    result.body_pose, result.betas,
+                    image,
+                    result.vertices,
+                    result.faces,
+                    go,
+                    cam_t,
+                    fl,
+                    result.body_pose,
+                    result.betas,
                     overlay_path,
                 )
 
@@ -506,7 +534,7 @@ class ConsensusBuilder:
                 f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
             for face in faces:
                 # OBJ is 1-indexed
-                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+                f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
 
     @staticmethod
     def _save_summary(result: ConsensusResult, path: Path) -> None:
@@ -543,7 +571,8 @@ class ConsensusBuilder:
             "",
             "Consensus Body Pose (23 joints):",
             f"  Total pose norm  : {float(np.linalg.norm(result.body_pose)):.4f} rad",
-            f"  Max joint rotation: {float(joint_mags.max()):.4f} rad (joint {int(joint_mags.argmax())})",
+            f"  Max joint rotation: {float(joint_mags.max()):.4f} rad "
+            f"(joint {int(joint_mags.argmax())})",
             f"  Mean joint rotation: {float(joint_mags.mean()):.4f} rad",
         ]
 

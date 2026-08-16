@@ -3,7 +3,6 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-
 # ---------------------------------------------------------------------------
 # Rotation conversions
 # ---------------------------------------------------------------------------
@@ -175,7 +174,7 @@ def procrustes_align(
     tgt_c = target - mu_t
 
     # Variance of source
-    var_s = np.sum(src_c ** 2) / J
+    var_s = np.sum(src_c**2) / J
 
     # Cross-covariance
     cov = (tgt_c.T @ src_c) / J  # (3, 3)

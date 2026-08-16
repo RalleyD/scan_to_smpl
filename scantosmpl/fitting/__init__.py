@@ -6,7 +6,12 @@ from scantosmpl.fitting.losses import (
     reprojection_loss,
     shape_regularisation,
 )
-from scantosmpl.fitting.optimiser import DEFAULT_STAGES, OptimisationStage, RefinementResult, SMPLOptimiser
+from scantosmpl.fitting.optimiser import (
+    DEFAULT_STAGES,
+    OptimisationStage,
+    RefinementResult,
+    SMPLOptimiser,
+)
 from scantosmpl.fitting.pipeline import Phase5Pipeline, Phase5Result
 
 __all__ = [

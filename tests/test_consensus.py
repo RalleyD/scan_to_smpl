@@ -17,7 +17,6 @@ from scantosmpl.utils.geometry import (
     so3_log,
 )
 
-
 # ---------------------------------------------------------------------------
 # Rotation conversions
 # ---------------------------------------------------------------------------
@@ -271,15 +270,15 @@ class TestBodyPoseAggregation:
         poses = [pose.copy() for _ in range(5)]
         weights = np.ones(5) / 5
 
-        N = len(poses)
+        len(poses)
         poses_arr = np.stack(poses, axis=0)
         consensus = np.zeros(69)
         for j in range(23):
-            joint_aa = poses_arr[:, j*3:(j+1)*3]
+            joint_aa = poses_arr[:, j * 3 : (j + 1) * 3]
             joint_rotmats = aa_to_rotmat(joint_aa)
             mean_rot = frechet_mean_so3(joint_rotmats, weights=weights)
             mean_aa = rotmat_to_aa(mean_rot.reshape(1, 3, 3))[0]
-            consensus[j*3:(j+1)*3] = mean_aa
+            consensus[j * 3 : (j + 1) * 3] = mean_aa
 
         np.testing.assert_allclose(consensus, pose, atol=1e-5)
 
@@ -292,11 +291,11 @@ class TestBodyPoseAggregation:
         poses_arr = np.stack(poses, axis=0)
         consensus = np.zeros(69)
         for j in range(23):
-            joint_aa = poses_arr[:, j*3:(j+1)*3]
+            joint_aa = poses_arr[:, j * 3 : (j + 1) * 3]
             joint_rotmats = aa_to_rotmat(joint_aa)
             mean_rot = frechet_mean_so3(joint_rotmats, weights=weights)
             mean_aa = rotmat_to_aa(mean_rot.reshape(1, 3, 3))[0]
-            consensus[j*3:(j+1)*3] = mean_aa
+            consensus[j * 3 : (j + 1) * 3] = mean_aa
 
         assert np.linalg.norm(consensus) < 0.1  # near zero
 
@@ -308,10 +307,10 @@ class TestBodyPoseAggregation:
         poses_arr = np.stack(poses, axis=0)
         consensus = np.zeros(69)
         for j in range(23):
-            joint_aa = poses_arr[:, j*3:(j+1)*3]
+            joint_aa = poses_arr[:, j * 3 : (j + 1) * 3]
             joint_rotmats = aa_to_rotmat(joint_aa)
             mean_rot = frechet_mean_so3(joint_rotmats, weights=weights)
             mean_aa = rotmat_to_aa(mean_rot.reshape(1, 3, 3))[0]
-            consensus[j*3:(j+1)*3] = mean_aa
+            consensus[j * 3 : (j + 1) * 3] = mean_aa
 
         assert consensus.shape == (69,)

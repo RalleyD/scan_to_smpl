@@ -26,7 +26,7 @@ class OptimisationStage:
     """Configuration for a single optimisation stage."""
 
     name: str
-    params: list[str]               # parameter names to optimise
+    params: list[str]  # parameter names to optimise
     n_iterations: int
     w_joint: float = 1.0
     w_reproj: float = 0.0
@@ -39,13 +39,13 @@ class OptimisationStage:
 class RefinementResult:
     """Output from the staged SMPL optimiser."""
 
-    betas: np.ndarray               # (10,)
-    body_pose: np.ndarray           # (69,)
-    global_orient: np.ndarray       # (3,)
-    translation: np.ndarray         # (3,)
+    betas: np.ndarray  # (10,)
+    body_pose: np.ndarray  # (69,)
+    global_orient: np.ndarray  # (3,)
+    translation: np.ndarray  # (3,)
     scale: float
-    vertices: np.ndarray            # (6890, 3)
-    joints: np.ndarray              # (24, 3)
+    vertices: np.ndarray  # (6890, 3)
+    joints: np.ndarray  # (24, 3)
     loss_history: dict[str, list[float]] = field(default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)
 
@@ -195,8 +195,7 @@ class SMPLOptimiser:
             three_quarter_cos=self.view_angle_three_quarter_cos,
         )
         view_weights = {
-            name: self.view_angle_weights.get(angle, 1.0)
-            for name, angle in view_angles.items()
+            name: self.view_angle_weights.get(angle, 1.0) for name, angle in view_angles.items()
         }
         # Apply per-view-name overrides (targeted rejection) AFTER the class
         # weights so a named camera wins over its angle grade. Matched on the
@@ -212,41 +211,41 @@ class SMPLOptimiser:
         # Cameras with weight 0 (rear) never contribute, so drop them up front —
         # keeps the tensor set small and matches the historical exclusion.
         front_cameras = {
-            cam: mat for cam, mat in cameras.items()
-            if view_weights.get(cam, 1.0) > 0.0
+            cam: mat for cam, mat in cameras.items() if view_weights.get(cam, 1.0) > 0.0
         }
         n_by_angle: dict[str, int] = {}
         for angle in view_angles.values():
             n_by_angle[angle] = n_by_angle.get(angle, 0) + 1
         logger.info(
             "View-angle grades: %s | kept %d/%d cameras (rear excluded)",
-            n_by_angle, len(front_cameras), len(cameras),
+            n_by_angle,
+            len(front_cameras),
+            len(cameras),
         )
 
         # Initialise SMPL params from consensus
         self.smpl.set_params(
-            betas=torch.tensor(
-                consensus.betas, dtype=torch.float32, device=self.device).unsqueeze(0),
+            betas=torch.tensor(consensus.betas, dtype=torch.float32, device=self.device).unsqueeze(
+                0
+            ),
             body_pose=torch.tensor(
-                consensus.body_pose, dtype=torch.float32, device=self.device).unsqueeze(0),
+                consensus.body_pose, dtype=torch.float32, device=self.device
+            ).unsqueeze(0),
             global_orient=torch.tensor(
-                consensus.global_orient, dtype=torch.float32, device=self.device).unsqueeze(0),
-            translation=torch.zeros(
-                1, 3, dtype=torch.float32, device=self.device),
+                consensus.global_orient, dtype=torch.float32, device=self.device
+            ).unsqueeze(0),
+            translation=torch.zeros(1, 3, dtype=torch.float32, device=self.device),
             scale=torch.ones(1, dtype=torch.float32, device=self.device),
         )
 
         # Pre-compute tensors that stay constant across stages
-        target_joints_t = torch.tensor(
-            triangulated_joints, dtype=torch.float32, device=self.device
-        )
+        target_joints_t = torch.tensor(triangulated_joints, dtype=torch.float32, device=self.device)
         kp2d_tensors = {
             k: torch.tensor(v, dtype=torch.float32, device=self.device)
             for k, v in keypoints_2d.items()
         }
         conf_tensors = {
-            k: torch.tensor(v, dtype=torch.float32, device=self.device)
-            for k, v in confs.items()
+            k: torch.tensor(v, dtype=torch.float32, device=self.device) for k, v in confs.items()
         }
         cam_tensors = {
             name: (
@@ -262,7 +261,11 @@ class SMPLOptimiser:
         for stage in stages:
             logger.info(
                 "Stage '%s': %d iters | params=%s | w_joint=%.2f w_reproj=%.2f",
-                stage.name, stage.n_iterations, stage.params, stage.w_joint, stage.w_reproj,
+                stage.name,
+                stage.n_iterations,
+                stage.params,
+                stage.w_joint,
+                stage.w_reproj,
             )
 
             params_to_opt = self._get_params(stage.params)
@@ -312,15 +315,16 @@ class SMPLOptimiser:
 
                 # Early stopping if converged
                 if abs(prev_loss - loss_val) < 1e-7 and it > 10:
-                    logger.debug(
-                        "Stage '%s' converged at iter %d", stage.name, it)
+                    logger.debug("Stage '%s' converged at iter %d", stage.name, it)
                     break
                 prev_loss = loss_val
 
             all_loss_history[stage.name] = stage_history
             logger.info(
                 "Stage '%s' done: loss %.4f → %.4f",
-                stage.name, stage_history[0] if stage_history else 0, stage_history[-1] if stage_history else 0,
+                stage.name,
+                stage_history[0] if stage_history else 0,
+                stage_history[-1] if stage_history else 0,
             )
 
         # Extract final parameters
@@ -339,10 +343,13 @@ class SMPLOptimiser:
         # Compute PA-MPJPE against triangulated joints (only where quality > 0)
         valid = np.linalg.norm(triangulated_joints, axis=1) > 1e-6
         if valid.sum() >= 2:
-            pa_mpjpe = compute_pa_mpjpe(
-                joints[: len(triangulated_joints)][valid],
-                triangulated_joints[valid],
-            ) * 1000  # metres → mm
+            pa_mpjpe = (
+                compute_pa_mpjpe(
+                    joints[: len(triangulated_joints)][valid],
+                    triangulated_joints[valid],
+                )
+                * 1000
+            )  # metres → mm
         else:
             pa_mpjpe = float("nan")
 
@@ -372,7 +379,6 @@ class SMPLOptimiser:
         result = []
         for name in param_names:
             if name not in param_map:
-                raise ValueError(
-                    f"Unknown parameter: '{name}'. Valid: {list(param_map)}")
+                raise ValueError(f"Unknown parameter: '{name}'. Valid: {list(param_map)}")
             result.append(param_map[name])
         return result

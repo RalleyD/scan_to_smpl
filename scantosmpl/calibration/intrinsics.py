@@ -1,7 +1,6 @@
 """Intrinsic matrix construction for PnP calibration."""
 
 import numpy as np
-from PIL import Image
 
 from scantosmpl.types import ViewResult
 
@@ -30,11 +29,14 @@ def build_intrinsic_matrix(
     else:
         cx, cy = principal_point
 
-    return np.array([
-        [focal_length_px, 0.0, cx],
-        [0.0, focal_length_px, cy],
-        [0.0, 0.0, 1.0],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [focal_length_px, 0.0, cx],
+            [0.0, focal_length_px, cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
 
 
 def get_intrinsics_for_view(

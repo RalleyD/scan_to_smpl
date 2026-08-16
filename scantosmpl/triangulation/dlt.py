@@ -62,9 +62,7 @@ def triangulate_point(
 
     # Build 2V × 4 system A x = 0
     rows = []
-    for i, (P, (u, v), w) in enumerate(
-        zip(projections, pts_2d, weights)
-    ):
+    for i, (P, (u, v), w) in enumerate(zip(projections, pts_2d, weights)):
         row_u = w * (u * P[2, :] - P[0, :])
         row_v = w * (v * P[2, :] - P[1, :])
         rows.append(row_u)

@@ -76,6 +76,10 @@ class ViewClassifier:
 
         logger.debug(
             "PARTIAL: %d keypoints visible (shoulder=%s, hip=%s, ankle=%s, wrist=%s)",
-            num_visible, has_shoulder, has_hip, has_ankle, has_wrist,
+            num_visible,
+            has_shoulder,
+            has_hip,
+            has_ankle,
+            has_wrist,
         )
         return ViewType.PARTIAL

@@ -26,10 +26,9 @@ def joint_loss(
     target = joints_target.to(pred.device)
 
     # Per-joint L2 distance, then Huber
-    diff = pred - target                    # (J, 3)
-    err = torch.norm(diff, dim=-1)          # (J,)
-    loss = F.huber_loss(err, torch.zeros_like(
-        err), delta=huber_delta, reduction="none")  # (J,)
+    diff = pred - target  # (J, 3)
+    err = torch.norm(diff, dim=-1)  # (J,)
+    loss = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta, reduction="none")  # (J,)
 
     if joint_weights is not None:
         w = joint_weights.to(pred.device)
@@ -107,17 +106,16 @@ def reprojection_loss(
         R = R.to(device)
         t = t.to(device)
         K = K.to(device)
-        kp2d = keypoints_2d[view_name].to(device)   # (J_coco, 2)
-        conf = confs[view_name].to(device)            # (J_coco,)
+        kp2d = keypoints_2d[view_name].to(device)  # (J_coco, 2)
+        conf = confs[view_name].to(device)  # (J_coco,)
 
         # Project SMPL joints: p_cam = R @ p_world + t
         # pts_cam: (J_smpl, 3)
         pts_cam = (R @ pred_joints.T).T + t
 
         # Perspective divide
-        pts_img_h = (K @ pts_cam.T).T          # (J_smpl, 3)
-        pts_img = pts_img_h[:, :2] / pts_img_h[:,
-                                               2:3].clamp(min=1e-6)  # (J_smpl, 2)
+        pts_img_h = (K @ pts_cam.T).T  # (J_smpl, 3)
+        pts_img = pts_img_h[:, :2] / pts_img_h[:, 2:3].clamp(min=1e-6)  # (J_smpl, 2)
 
         # Match COCO indices to SMPL joints
         for coco_idx, smpl_idx in coco_to_smpl.items():
@@ -127,8 +125,8 @@ def reprojection_loss(
             if w < 0.1:  # skip near-zero confidence
                 continue
 
-            proj = pts_img[smpl_idx]      # (2,)
-            obs = kp2d[coco_idx]          # (2,)
+            proj = pts_img[smpl_idx]  # (2,)
+            obs = kp2d[coco_idx]  # (2,)
             err = torch.norm(proj - obs)  # scalar pixel error
             huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
             total_loss = total_loss + vw * w * huber
@@ -145,8 +143,8 @@ def reprojection_loss(
                 if w < 0.1:  # skip near-zero confidence on either endpoint
                     continue
 
-                proj = pts_img[smpl_idx]              # (2,)
-                obs = (kp2d[a] + kp2d[b]) / 2.0        # (2,)
+                proj = pts_img[smpl_idx]  # (2,)
+                obs = (kp2d[a] + kp2d[b]) / 2.0  # (2,)
                 err = torch.norm(proj - obs)
                 huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
                 total_loss = total_loss + vw * w * huber
@@ -164,11 +162,11 @@ def reprojection_loss(
                 if w < 0.1:  # skip near-zero confidence on either endpoint
                     continue
 
-                p3d = 0.5 * (verts[vl] + verts[vr])       # (3,) world-space
-                p_cam = R @ p3d + t                        # (3,)
-                p_h = K @ p_cam                            # (3,)
+                p3d = 0.5 * (verts[vl] + verts[vr])  # (3,) world-space
+                p_cam = R @ p3d + t  # (3,)
+                p_h = K @ p_cam  # (3,)
                 proj = p_h[:2] / p_h[2:3].clamp(min=1e-6)  # (2,)
-                obs = (kp2d[a] + kp2d[b]) / 2.0            # (2,)
+                obs = (kp2d[a] + kp2d[b]) / 2.0  # (2,)
                 err = torch.norm(proj - obs)
                 huber = F.huber_loss(err, torch.zeros_like(err), delta=huber_delta)
                 total_loss = total_loss + vw * w * huber
@@ -189,7 +187,7 @@ def pose_prior_loss(body_pose: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar loss.
     """
-    return (body_pose ** 2).mean()
+    return (body_pose**2).mean()
 
 
 def shape_regularisation(betas: torch.Tensor) -> torch.Tensor:
@@ -201,4 +199,4 @@ def shape_regularisation(betas: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar loss.
     """
-    return (betas ** 2).mean()
+    return (betas**2).mean()

@@ -11,7 +11,9 @@ def main():
 
 
 @main.command()
-@click.option("--image-dir", required=True, type=click.Path(exists=True), help="Directory of images")
+@click.option(
+    "--image-dir", required=True, type=click.Path(exists=True), help="Directory of images"
+)
 @click.option("--reference-pose", default="a-pose", type=click.Choice(["a-pose", "t-pose"]))
 @click.option("--gender", default="neutral", type=click.Choice(["neutral", "male", "female"]))
 @click.option("--output", required=True, type=click.Path(), help="Output directory")
@@ -32,12 +34,14 @@ def fit_pointcloud(pointcloud, gender, output):
 
 
 @main.command()
-@click.option("--image-dir", required=True, type=click.Path(exists=True), help="Directory of images")
+@click.option(
+    "--image-dir", required=True, type=click.Path(exists=True), help="Directory of images"
+)
 @click.option("--pointcloud", required=True, type=click.Path(exists=True), help="PLY/OBJ file")
 @click.option("--reference-pose", default="a-pose", type=click.Choice(["a-pose", "t-pose"]))
 @click.option("--gender", default="neutral", type=click.Choice(["neutral", "male", "female"]))
 @click.option("--output", required=True, type=click.Path(), help="Output directory")
 def fit_combined(image_dir, pointcloud, reference_pose, gender, output):
     """Fit SMPL to images + point cloud (Tier 1 + 2 + 3, best accuracy)."""
-    click.echo(f"Fitting SMPL to images + point cloud")
+    click.echo("Fitting SMPL to images + point cloud")
     raise NotImplementedError("Phase 8: pipeline orchestrator")

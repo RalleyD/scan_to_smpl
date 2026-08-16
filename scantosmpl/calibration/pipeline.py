@@ -63,9 +63,7 @@ class CalibrationPipeline:
         if debug_dir is None:
             debug_dir = cfg.debug_dir
 
-        corr_builder = CorrespondenceBuilder(
-            consensus.vertices, consensus.joints
-        )
+        corr_builder = CorrespondenceBuilder(consensus.vertices, consensus.joints)
         solver_dense = PnPSolver(
             pnp_method=cfg.pnp_method,
             ransac_threshold=cfg.ransac_threshold,
@@ -105,7 +103,10 @@ class CalibrationPipeline:
                 # Dense PnP (138 correspondences)
                 pts_3d, pts_2d, confs = corr_builder.build_dense_correspondences(view)
                 result = solver_dense.solve(
-                    pts_3d, pts_2d, confs, K,
+                    pts_3d,
+                    pts_2d,
+                    confs,
+                    K,
                     conf_threshold=cfg.dense_conf_threshold,
                     correspondence_type="dense_138",
                 )
@@ -116,11 +117,15 @@ class CalibrationPipeline:
                 if not result.success and view.keypoints_2d is not None:
                     logger.info(
                         "%s: dense PnP failed (%d inliers), falling back to sparse",
-                        name, result.n_inliers,
+                        name,
+                        result.n_inliers,
                     )
                     pts_3d_s, pts_2d_s, confs_s = corr_builder.build_sparse_correspondences(view)
                     result = solver_sparse.solve(
-                        pts_3d_s, pts_2d_s, confs_s, K,
+                        pts_3d_s,
+                        pts_2d_s,
+                        confs_s,
+                        K,
                         conf_threshold=cfg.sparse_conf_threshold,
                         correspondence_type="dense_sparse_fallback",
                     )
@@ -131,13 +136,17 @@ class CalibrationPipeline:
                 if view.keypoints_2d is None or view.keypoint_confs is None:
                     logger.warning("Skipping %s: no keypoints available", name)
                     pnp_results[name] = PnPResult(
-                        success=False, correspondence_type="none",
+                        success=False,
+                        correspondence_type="none",
                     )
                     continue
 
                 pts_3d, pts_2d, confs = corr_builder.build_sparse_correspondences(view)
                 result = solver_sparse.solve(
-                    pts_3d, pts_2d, confs, K,
+                    pts_3d,
+                    pts_2d,
+                    confs,
+                    K,
                     conf_threshold=cfg.sparse_conf_threshold,
                     correspondence_type="sparse_coco",
                 )
@@ -147,7 +156,9 @@ class CalibrationPipeline:
             if result.success and result.reprojection_error > cfg.max_reprojection_error:
                 logger.warning(
                     "%s: reprojection error %.1fpx exceeds %.1fpx threshold — rejecting",
-                    name, result.reprojection_error, cfg.max_reprojection_error,
+                    name,
+                    result.reprojection_error,
+                    cfg.max_reprojection_error,
                 )
                 result = PnPResult(
                     success=False,
@@ -172,22 +183,27 @@ class CalibrationPipeline:
             status = "OK" if result.success else "FAIL"
             logger.info(
                 "%s: %s (%s, inliers=%d/%d, reproj=%.1fpx)",
-                name, status, result.correspondence_type,
-                result.n_inliers, result.n_correspondences,
+                name,
+                status,
+                result.correspondence_type,
+                result.n_inliers,
+                result.n_correspondences,
                 result.reprojection_error,
             )
 
         # Step 3: A/B comparison — run sparse PnP on dense views
         ab_comparison = self._ab_comparison(
-            views, dense_views, corr_builder, solver_sparse,
-            image_dir, pnp_results,
+            views,
+            dense_views,
+            corr_builder,
+            solver_sparse,
+            image_dir,
+            pnp_results,
         )
 
         # Step 4: Camera geometry validation
         solved = {n: r for n, r in pnp_results.items() if r.success}
-        camera_centers = {
-            n: r.cam_center for n, r in solved.items() if r.cam_center is not None
-        }
+        camera_centers = {n: r.cam_center for n, r in solved.items() if r.cam_center is not None}
         geometry_plausible, geometry_stats = self._validate_geometry(camera_centers)
 
         # Aggregate stats
@@ -245,13 +261,18 @@ class CalibrationPipeline:
 
             pts_3d, pts_2d, confs = corr_builder.build_sparse_correspondences(view)
             sparse_result = solver_sparse.solve(
-                pts_3d, pts_2d, confs, K,
+                pts_3d,
+                pts_2d,
+                confs,
+                K,
                 conf_threshold=self.config.sparse_conf_threshold,
                 correspondence_type="sparse_coco",
             )
 
             dense_reproj = dense_results[name].reprojection_error
-            sparse_reproj = sparse_result.reprojection_error if sparse_result.success else float("inf")
+            sparse_reproj = (
+                sparse_result.reprojection_error if sparse_result.success else float("inf")
+            )
             comparison[name] = {
                 "dense_reproj_px": dense_reproj,
                 "sparse_reproj_px": sparse_reproj,
@@ -371,54 +392,62 @@ class CalibrationPipeline:
 
         # A/B comparison
         if result.ab_comparison:
-            lines.extend([
-                "",
-                "A/B Comparison (criterion 4.6): Dense vs Sparse on same views",
-                f"  {'View':<28} {'Dense(px)':<12} {'Sparse(px)':<12} {'Winner'}",
-                "  " + "-" * 56,
-            ])
+            lines.extend(
+                [
+                    "",
+                    "A/B Comparison (criterion 4.6): Dense vs Sparse on same views",
+                    f"  {'View':<28} {'Dense(px)':<12} {'Sparse(px)':<12} {'Winner'}",
+                    "  " + "-" * 56,
+                ]
+            )
             dense_wins = 0
             for name, comp in result.ab_comparison.items():
                 winner = "dense" if comp["dense_wins"] else "sparse"
                 if comp["dense_wins"]:
                     dense_wins += 1
                 sparse_str = (
-                    f"{comp['sparse_reproj_px']:.2f}"
-                    if comp["sparse_reproj_px"] < 1e6 else "FAIL"
+                    f"{comp['sparse_reproj_px']:.2f}" if comp["sparse_reproj_px"] < 1e6 else "FAIL"
                 )
                 lines.append(
-                    f"  {name:<28} {comp['dense_reproj_px']:>8.2f}    "
-                    f"{sparse_str:>8}    {winner}"
+                    f"  {name:<28} {comp['dense_reproj_px']:>8.2f}    {sparse_str:>8}    {winner}"
                 )
             total_ab = len(result.ab_comparison)
-            lines.append(
-                f"  Dense wins: {dense_wins}/{total_ab}"
-            )
+            lines.append(f"  Dense wins: {dense_wins}/{total_ab}")
 
         # Geometry validation
-        lines.extend([
-            "",
-            "Camera Geometry Validation:",
-        ])
+        lines.extend(
+            [
+                "",
+                "Camera Geometry Validation:",
+            ]
+        )
         for k, v in result.geometry_stats.items():
             lines.append(f"  {k:<24}: {v}")
-        lines.append(
-            f"  Plausible              : {'YES' if result.geometry_plausible else 'NO'}"
-        )
+        lines.append(f"  Plausible              : {'YES' if result.geometry_plausible else 'NO'}")
 
         # Acceptance criteria summary
         n_dense_total = len(dense_views)
         n_sparse_total = len(sparse_views)
-        lines.extend([
-            "",
-            "Acceptance Criteria:",
-            f"  4.1 Dense >=90% success   : {result.n_views_dense}/{n_dense_total}"
-            f"  {'PASS' if n_dense_total > 0 and result.n_views_dense / n_dense_total >= 0.9 else 'FAIL'}",
-            f"  4.2 Sparse >=50% success  : {result.n_views_sparse}/{n_sparse_total}"
-            f"  {'PASS' if n_sparse_total > 0 and result.n_views_sparse / n_sparse_total >= 0.5 else 'FAIL' if n_sparse_total > 0 else 'N/A'}",
-            f"  4.3 Geometry plausible    : {'PASS' if result.geometry_plausible else 'FAIL'}",
-            f"  4.4 Reproj < 80px         : {'PASS' if result.mean_reprojection_error < 80.0 else 'FAIL'}",
-        ])
+        dense_verdict = (
+            "PASS" if n_dense_total > 0 and result.n_views_dense / n_dense_total >= 0.9 else "FAIL"
+        )
+        if n_sparse_total == 0:
+            sparse_verdict = "N/A"
+        else:
+            sparse_verdict = "PASS" if result.n_views_sparse / n_sparse_total >= 0.5 else "FAIL"
+        lines.extend(
+            [
+                "",
+                "Acceptance Criteria:",
+                f"  4.1 Dense >=90% success   : {result.n_views_dense}/{n_dense_total}"
+                f"  {dense_verdict}",
+                f"  4.2 Sparse >=50% success  : {result.n_views_sparse}/{n_sparse_total}"
+                f"  {sparse_verdict}",
+                f"  4.3 Geometry plausible    : {'PASS' if result.geometry_plausible else 'FAIL'}",
+                f"  4.4 Reproj < 80px         : "
+                f"{'PASS' if result.mean_reprojection_error < 80.0 else 'FAIL'}",
+            ]
+        )
         if result.ab_comparison:
             dense_wins = sum(1 for c in result.ab_comparison.values() if c["dense_wins"])
             lines.append(
@@ -446,6 +475,7 @@ class CalibrationPipeline:
 
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
         except ImportError:
@@ -461,8 +491,11 @@ class CalibrationPipeline:
         ax1.scatter(centers[:, 0], centers[:, 2], c="steelblue", s=60, zorder=5)
         for i, n in enumerate(names):
             ax1.annotate(
-                n.replace(".JPG", ""), (centers[i, 0], centers[i, 2]),
-                fontsize=6, ha="center", va="bottom",
+                n.replace(".JPG", ""),
+                (centers[i, 0], centers[i, 2]),
+                fontsize=6,
+                ha="center",
+                va="bottom",
             )
         ax1.scatter([0], [0], c="red", s=100, marker="x", zorder=10, label="Subject")
         ax1.set_xlabel("X (m)")
@@ -476,8 +509,11 @@ class CalibrationPipeline:
         ax2.scatter(centers[:, 0], centers[:, 1], c="steelblue", s=60, zorder=5)
         for i, n in enumerate(names):
             ax2.annotate(
-                n.replace(".JPG", ""), (centers[i, 0], centers[i, 1]),
-                fontsize=6, ha="center", va="bottom",
+                n.replace(".JPG", ""),
+                (centers[i, 0], centers[i, 1]),
+                fontsize=6,
+                ha="center",
+                va="bottom",
             )
         ax2.scatter([0], [0], c="red", s=100, marker="x", zorder=10, label="Subject")
         ax2.set_xlabel("X (m)")

@@ -136,7 +136,7 @@ class TestCameraHMRSingleImage:
         out = inference.infer(img, view.bbox, view.camera.focal_length)
 
         go_mag = float(np.linalg.norm(out.global_orient))
-        bp_norms = [float(np.linalg.norm(out.body_pose[i * 3: i * 3 + 3])) for i in range(23)]
+        bp_norms = [float(np.linalg.norm(out.body_pose[i * 3 : i * 3 + 3])) for i in range(23)]
         assert go_mag < 2 * np.pi, f"Global orient magnitude too large: {go_mag}"
         assert max(bp_norms) < 2 * np.pi, f"Body pose joint magnitude too large: {max(bp_norms)}"
 
@@ -152,8 +152,7 @@ class TestFoVCrossCheck:
         from scantosmpl.types import ViewType
 
         full_body = [
-            v for v in detection_views
-            if v.view_type == ViewType.FULL_BODY and v.bbox is not None
+            v for v in detection_views if v.view_type == ViewType.FULL_BODY and v.bbox is not None
         ][:5]
         assert full_body, "No FULL_BODY views found"
 
@@ -167,9 +166,8 @@ class TestFoVCrossCheck:
                 diffs.append((view.image_path.name, out.fov_exif, out.fov_flnet, diff))
 
         failures = [(n, e, f, d) for n, e, f, d in diffs if d >= 10.0]
-        assert not failures, (
-            f"FoV diff >= 10° for: "
-            + ", ".join(f"{n}: exif={e:.1f}°, flnet={f:.1f}°, diff={d:.1f}°" for n, e, f, d in failures)
+        assert not failures, "FoV diff >= 10° for: " + ", ".join(
+            f"{n}: exif={e:.1f}°, flnet={f:.1f}°, diff={d:.1f}°" for n, e, f, d in failures
         )
 
 
@@ -189,7 +187,11 @@ class TestDenseKeypoints:
         from scantosmpl.types import ViewType
 
         views, _ = pipeline_results
-        full_body = [v for v in views if v.view_type == ViewType.FULL_BODY and v.dense_keypoints_2d is not None]
+        full_body = [
+            v
+            for v in views
+            if v.view_type == ViewType.FULL_BODY and v.dense_keypoints_2d is not None
+        ]
         assert full_body, "No FULL_BODY views with dense keypoints found"
 
         for view in full_body:
@@ -197,17 +199,17 @@ class TestDenseKeypoints:
             W, H = img.size
             kps = view.dense_keypoints_2d
 
-            assert kps.shape == (138, 2), (
-                f"{view.image_path.name}: dense kp shape {kps.shape}"
-            )
+            assert kps.shape == (138, 2), f"{view.image_path.name}: dense kp shape {kps.shape}"
             assert view.dense_keypoint_confs.shape == (138,)
 
             # 138 dense points sample the full 3D surface including occluded back-of-body
             # vertices, which legitimately project outside the frame for non-frontal views.
             # Threshold: at least half should fall within a generous ±100px margin.
             in_bounds = (
-                (kps[:, 0] >= -100) & (kps[:, 0] <= W + 100)
-                & (kps[:, 1] >= -100) & (kps[:, 1] <= H + 100)
+                (kps[:, 0] >= -100)
+                & (kps[:, 0] <= W + 100)
+                & (kps[:, 1] >= -100)
+                & (kps[:, 1] <= H + 100)
             )
             frac_in = float(in_bounds.sum()) / 138.0
             assert frac_in >= 0.5, (
@@ -247,8 +249,10 @@ class TestHMRPipelineAllImages:
     def test_all_views_produce_output(self, pipeline_results):
         views, _ = pipeline_results
         from scantosmpl.types import ViewType
+
         suitable = [
-            v for v in views
+            v
+            for v in views
             if v.view_type in (ViewType.FULL_BODY, ViewType.PARTIAL) and v.hmr_suitable
         ]
         hmr_done = [v for v in views if v.betas is not None]
@@ -265,9 +269,7 @@ class TestHMRPipelineAllImages:
         betas_all = np.stack(betas_list, axis=0)  # (N, 10)
         beta_std = np.std(betas_all, axis=0)
         failures = [(i, s) for i, s in enumerate(beta_std) if s >= 1.0]
-        assert not failures, (
-            f"β std >= 1.0 for components {[(i, f'{s:.3f}') for i, s in failures]}"
-        )
+        assert not failures, f"β std >= 1.0 for components {[(i, f'{s:.3f}') for i, s in failures]}"
 
     def test_pose_variance_low_for_t_pose(self, pipeline_results):
         """Criterion 2.6: body_pose variance should be low (subjects in T-pose)."""

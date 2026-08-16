@@ -67,8 +67,8 @@ from scantosmpl.utils.geometry import project_points
 logger = logging.getLogger(__name__)
 
 # SMPL-24 joints not enumerated in Smpl24Joint (chest / head landmarks).
-_SPINE3 = 9   # upper spine / thorax — chest-height proxy
-_HEAD = 15    # head joint
+_SPINE3 = 9  # upper spine / thorax — chest-height proxy
+_HEAD = 15  # head joint
 
 # Weight maps: rear always excluded (0.0); only the profile weight differs.
 _W_FULL: dict[str, float] = {"frontal": 1.0, "three_quarter": 1.0, "profile": 1.0, "rear": 0.0}
@@ -82,8 +82,8 @@ _NO_NAME: dict[str, float] = {}
 # (profile, ~158px). Down-weight/drop ONLY these, keeping the good profile
 # (cam02_4, ~51px) at full strength — the surgical alternative to W3's blanket
 # profile-0.3, which suppresses good and bad profiles alike.
-_TGT_DROP: dict[str, float] = {"cam06_4": 0.0, "cam02_5": 0.0}   # exclude outliers
-_TGT_DOWN: dict[str, float] = {"cam06_4": 0.3, "cam02_5": 0.3}   # down-weight outliers
+_TGT_DROP: dict[str, float] = {"cam06_4": 0.0, "cam02_5": 0.0}  # exclude outliers
+_TGT_DOWN: dict[str, float] = {"cam06_4": 0.3, "cam02_5": 0.3}  # down-weight outliers
 
 # (label, joint_midpoint (old head anchor), vertex_midpoint (new head anchor),
 #  angle-class weights, per-view-name overrides).

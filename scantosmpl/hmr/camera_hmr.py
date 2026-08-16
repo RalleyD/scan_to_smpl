@@ -40,14 +40,14 @@ def _patch_smpl_mean_params(smpl_mean_params_path: str) -> None:
 class HMROutput:
     """Output from CameraHMR inference on a single image."""
 
-    betas: np.ndarray            # (10,) shape parameters
-    body_pose: np.ndarray        # (69,) body pose axis-angle (23 joints × 3)
-    global_orient: np.ndarray    # (3,) global orientation axis-angle
+    betas: np.ndarray  # (10,) shape parameters
+    body_pose: np.ndarray  # (69,) body pose axis-angle (23 joints × 3)
+    global_orient: np.ndarray  # (3,) global orientation axis-angle
     cam_translation: np.ndarray  # (3,) camera-space translation (CLIFF conversion)
-    dense_keypoints_2d: np.ndarray   # (138, 2) image pixel coordinates
+    dense_keypoints_2d: np.ndarray  # (138, 2) image pixel coordinates
     dense_keypoint_confs: np.ndarray  # (138,) confidence scores in [0, 1]
-    fov_flnet: float | None      # vertical FoV from FLNet in degrees (None if failed)
-    fov_exif: float              # vertical FoV from EXIF focal length in degrees
+    fov_flnet: float | None  # vertical FoV from FLNet in degrees (None if failed)
+    fov_exif: float  # vertical FoV from EXIF focal length in degrees
     vertices: np.ndarray | None = None  # (6890, 3) SMPL vertices in camera space
 
 
@@ -69,12 +69,16 @@ class CameraHMRInference:
         # CameraHMR — Lightning checkpoint, model_type='smpl'
         from core.camerahmr_model import CameraHMR
 
-        self.camerahmr = CameraHMR.load_from_checkpoint(
-            str(cfg.checkpoint_path),
-            map_location=self.device,
-            strict=True,
-            weights_only=False,
-        ).to(self.device).eval()
+        self.camerahmr = (
+            CameraHMR.load_from_checkpoint(
+                str(cfg.checkpoint_path),
+                map_location=self.device,
+                strict=True,
+                weights_only=False,
+            )
+            .to(self.device)
+            .eval()
+        )
 
         # DenseKP head only — load checkpoint on CPU, extract head weights, skip backbone.
         # Loading the full DenseKP model (another 7.5 GB ViT-H) to GPU would exhaust VRAM
@@ -85,9 +89,7 @@ class CameraHMRInference:
         densekp_ckpt = torch.load(str(cfg.densekp_path), map_location="cpu", weights_only=False)
         densekp_state = densekp_ckpt.get("state_dict", densekp_ckpt)
         head_state = {
-            k[len("head."):]: v
-            for k, v in densekp_state.items()
-            if k.startswith("head.")
+            k[len("head.") :]: v for k, v in densekp_state.items() if k.startswith("head.")
         }
         self.densekp_head = build_keypoints_head().to(self.device).eval()
         self.densekp_head.load_state_dict(head_state, strict=True)
@@ -106,12 +108,16 @@ class CameraHMRInference:
         # SMPL model for vertex computation (wireframe overlays)
         import smplx
 
-        self.smpl = smplx.create(
-            str(cfg.smpl_model_path),
-            model_type="smpl",
-            gender="neutral",
-            use_face_contour=False,
-        ).to(self.device).eval()
+        self.smpl = (
+            smplx.create(
+                str(cfg.smpl_model_path),
+                model_type="smpl",
+                gender="neutral",
+                use_face_contour=False,
+            )
+            .to(self.device)
+            .eval()
+        )
         self.smpl_faces = self.smpl.faces  # (13776, 3)
 
     # ------------------------------------------------------------------
@@ -316,8 +322,8 @@ class CameraHMRInference:
             pass  # FLNet failure is non-fatal; EXIF focal length is primary
 
         # 7. Convert rotation matrices → axis-angle
-        go_aa = self._rotmat_to_aa(pred_smpl_params["global_orient"][0])   # (1, 3)
-        bp_aa = self._rotmat_to_aa(pred_smpl_params["body_pose"][0])        # (23, 3)
+        go_aa = self._rotmat_to_aa(pred_smpl_params["global_orient"][0])  # (1, 3)
+        bp_aa = self._rotmat_to_aa(pred_smpl_params["body_pose"][0])  # (23, 3)
 
         # 8. CLIFF weak-perspective → 3D camera translation
         cam_trans = self._cliff_camera(
@@ -332,7 +338,10 @@ class CameraHMRInference:
         vertices = None
         try:
             smpl_out = self.smpl(
-                global_orient=torch.from_numpy(go_aa.flatten()).float().unsqueeze(0).to(self.device),
+                global_orient=torch.from_numpy(go_aa.flatten())
+                .float()
+                .unsqueeze(0)
+                .to(self.device),
                 body_pose=torch.from_numpy(bp_aa.flatten()).float().unsqueeze(0).to(self.device),
                 betas=pred_smpl_params["betas"].view(1, -1),
             )
@@ -346,7 +355,7 @@ class CameraHMRInference:
 
         return HMROutput(
             betas=pred_smpl_params["betas"][0].cpu().numpy().astype(np.float32),
-            body_pose=bp_aa.flatten(),   # (69,)
+            body_pose=bp_aa.flatten(),  # (69,)
             global_orient=go_aa.flatten(),  # (3,)
             cam_translation=cam_trans,
             dense_keypoints_2d=kps_px,
@@ -364,7 +373,4 @@ class CameraHMRInference:
         focal_lengths: list[float],
     ) -> list[HMROutput]:
         """Process a list of images sequentially (shared model state)."""
-        return [
-            self.infer(img, bbox, fl)
-            for img, bbox, fl in zip(images, bboxes, focal_lengths)
-        ]
+        return [self.infer(img, bbox, fl) for img, bbox, fl in zip(images, bboxes, focal_lengths)]

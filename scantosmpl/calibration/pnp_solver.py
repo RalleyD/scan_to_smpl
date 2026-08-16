@@ -24,16 +24,16 @@ class PnPResult:
     """Result from a single PnP solve."""
 
     success: bool
-    rotation: np.ndarray | None = None       # (3, 3) rotation matrix
-    translation: np.ndarray | None = None    # (3,) translation vector
-    rvec: np.ndarray | None = None           # (3,) Rodrigues vector
-    tvec: np.ndarray | None = None           # (3,) translation (OpenCV format)
-    inliers: np.ndarray | None = None        # inlier indices from RANSAC
+    rotation: np.ndarray | None = None  # (3, 3) rotation matrix
+    translation: np.ndarray | None = None  # (3,) translation vector
+    rvec: np.ndarray | None = None  # (3,) Rodrigues vector
+    tvec: np.ndarray | None = None  # (3,) translation (OpenCV format)
+    inliers: np.ndarray | None = None  # inlier indices from RANSAC
     n_correspondences: int = 0
     n_inliers: int = 0
     reprojection_error: float = float("inf")  # mean reprojection error on inliers (px)
-    correspondence_type: str = "unknown"      # "dense_138" or "sparse_coco"
-    cam_center: np.ndarray | None = None     # (3,) world-space camera position
+    correspondence_type: str = "unknown"  # "dense_138" or "sparse_coco"
+    cam_center: np.ndarray | None = None  # (3,) world-space camera position
 
 
 class PnPSolver:
@@ -92,7 +92,8 @@ class PnPSolver:
         if n_filtered < 4:
             logger.warning(
                 "PnP %s: only %d points after confidence filter (need >= 4)",
-                correspondence_type, n_filtered,
+                correspondence_type,
+                n_filtered,
             )
             return PnPResult(
                 success=False,
@@ -123,7 +124,8 @@ class PnPSolver:
                 "PnP %s: RANSAC %s (inliers=%d, need=%d)",
                 correspondence_type,
                 "failed" if not success else "too few inliers",
-                n_inl, self.min_inliers,
+                n_inl,
+                self.min_inliers,
             )
             return PnPResult(
                 success=False,

@@ -46,9 +46,9 @@ class TestDisplacements:
         gen = torch.Generator(device="cpu").manual_seed(0)
         self.model.set_params(
             betas=torch.randn(1, 10, generator=gen).to(self.model.device) * 0.5,
-            body_pose=torch.randn(
-                1, self.model.body_model.NUM_BODY_JOINTS * 3, generator=gen
-            ).to(self.model.device)
+            body_pose=torch.randn(1, self.model.body_model.NUM_BODY_JOINTS * 3, generator=gen).to(
+                self.model.device
+            )
             * 0.05,
             global_orient=torch.tensor([[0.1, 0.2, -0.3]]).to(self.model.device),
             translation=torch.tensor([[0.3, -0.2, 1.5]]).to(self.model.device),

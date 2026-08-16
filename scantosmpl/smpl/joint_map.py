@@ -1,7 +1,6 @@
 """Joint mapping constants: COCO-17 <-> SMPL-24 and CameraHMR dense keypoints."""
 
 import numpy as np
-from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # COCO-17 -> SMPL-24 joint mapping
@@ -32,24 +31,24 @@ class Smpl24Joint:
 
 
 COCO_TO_SMPL: dict[int, int] = {
-    5: 16,   # left_shoulder
-    6: 17,   # right_shoulder
-    7: 18,   # left_elbow
-    8: 19,   # right_elbow
-    9: 20,   # left_wrist
+    5: 16,  # left_shoulder
+    6: 17,  # right_shoulder
+    7: 18,  # left_elbow
+    8: 19,  # right_elbow
+    9: 20,  # left_wrist
     10: 21,  # right_wrist
-    11: 1,   # left_hip
-    12: 2,   # right_hip
-    13: 4,   # left_knee
-    14: 5,   # right_knee
-    15: 7,   # left_ankle
-    16: 8,   # right_ankle
+    11: 1,  # left_hip
+    12: 2,  # right_hip
+    13: 4,  # left_knee
+    14: 5,  # right_knee
+    15: 7,  # left_ankle
+    16: 8,  # right_ankle
 }
 
 # Derived keypoints (computed as midpoints of COCO pairs -> SMPL joints)
 COCO_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
-    (11, 12): 0,   # mid(left_hip, right_hip) -> pelvis
-    (5, 6): 12,    # mid(left_shoulder, right_shoulder) -> neck
+    (11, 12): 0,  # mid(left_hip, right_hip) -> pelvis
+    (5, 6): 12,  # mid(left_shoulder, right_shoulder) -> neck
 }
 
 # Head correspondence for the reprojection loss (W2 — head-protrusion fix).
@@ -71,7 +70,7 @@ COCO_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
 # measured in the A/B refit (head_up +2cm, head_pitch -18deg, PA-MPJPE +2.4mm).
 # Use HEAD_MIDPOINT_TO_VERTEX below instead.
 HEAD_MIDPOINT_TO_SMPL: dict[tuple[int, int], int] = {
-    (3, 4): 15,    # mid(left_ear, right_ear) -> head joint (biased; see above)
+    (3, 4): 15,  # mid(left_ear, right_ear) -> head joint (biased; see above)
 }
 
 # Vertex-anchored head correspondence (W2, fixed). The 2D ears-midpoint is matched

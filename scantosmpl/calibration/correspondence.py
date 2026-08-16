@@ -53,9 +53,7 @@ class CorrespondenceBuilder:
             ValueError: If view lacks dense keypoint data.
         """
         if view.dense_keypoints_2d is None or view.dense_keypoint_confs is None:
-            raise ValueError(
-                f"{view.image_path.name}: no dense keypoints available"
-            )
+            raise ValueError(f"{view.image_path.name}: no dense keypoints available")
 
         pts_3d = self.dense_3d.copy()
         pts_2d = view.dense_keypoints_2d.astype(np.float64)
@@ -85,15 +83,13 @@ class CorrespondenceBuilder:
             ValueError: If view lacks COCO keypoint data.
         """
         if view.keypoints_2d is None or view.keypoint_confs is None:
-            raise ValueError(
-                f"{view.image_path.name}: no COCO keypoints available"
-            )
+            raise ValueError(f"{view.image_path.name}: no COCO keypoints available")
 
         pts_3d_list = []
         pts_2d_list = []
         confs_list = []
 
-        kps_2d = view.keypoints_2d.astype(np.float64)   # (17, 2)
+        kps_2d = view.keypoints_2d.astype(np.float64)  # (17, 2)
         kp_confs = view.keypoint_confs.astype(np.float64)  # (17,)
 
         # Direct COCO -> SMPL correspondences

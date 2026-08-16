@@ -36,6 +36,7 @@ class TestPersonDetection:
     @pytest.fixture(scope="class")
     def detector(self):
         import torch
+
         from scantosmpl.detection.person_detector import PersonDetector
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,6 +79,7 @@ class TestKeypointDetection:
     @pytest.fixture(scope="class")
     def detectors(self):
         import torch
+
         from scantosmpl.detection.keypoint_detector import KeypointDetector
         from scantosmpl.detection.person_detector import PersonDetector
 
@@ -101,9 +103,7 @@ class TestKeypointDetection:
                 continue
             kp = detectors["keypoint"].detect(loaded.image, det.bbox)
             n_visible = int((kp.confidences > 0.3).sum())
-            assert n_visible >= 5, (
-                f"Only {n_visible}/17 keypoints in {loaded.path.name}"
-            )
+            assert n_visible >= 5, f"Only {n_visible}/17 keypoints in {loaded.path.name}"
 
 
 @requires_scan
@@ -113,14 +113,12 @@ class TestClassificationGroundTruth:
     @pytest.fixture(scope="class")
     def pipeline_results(self):
         import torch
+
         from scantosmpl.detection.pipeline import DetectionPipeline
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         pipeline = DetectionPipeline(device=device)
-        return {
-            r.image_path.name: r
-            for r in pipeline.process_directory(SCAN_DIR)
-        }
+        return {r.image_path.name: r for r in pipeline.process_directory(SCAN_DIR)}
 
     @pytest.fixture(scope="class")
     def ground_truth(self):
@@ -166,6 +164,7 @@ class TestDetectionPipeline:
     def test_pipeline_runs(self, tmp_path):
         """Pipeline runs on scanner images and produces debug output."""
         import torch
+
         from scantosmpl.detection.pipeline import DetectionPipeline
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -189,6 +188,4 @@ class TestDetectionPipeline:
         loaded = load_directory(SCAN_DIR)
         for img in loaded:
             f = img.camera.focal_length
-            assert 500 < f < 15000, (
-                f"Unreasonable focal length {f:.0f}px for {img.path.name}"
-            )
+            assert 500 < f < 15000, f"Unreasonable focal length {f:.0f}px for {img.path.name}"

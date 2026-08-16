@@ -178,9 +178,7 @@ def test_point_to_surface_rejects_bad_input():
         point_to_surface_distances(np.zeros((0, 3)), UNIT_TRIANGLE_V, UNIT_TRIANGLE_F)
 
     with pytest.raises(ValueError, match="non-finite"):
-        point_to_surface_distances(
-            np.array([[np.nan, 0.0, 0.0]]), UNIT_TRIANGLE_V, UNIT_TRIANGLE_F
-        )
+        point_to_surface_distances(np.array([[np.nan, 0.0, 0.0]]), UNIT_TRIANGLE_V, UNIT_TRIANGLE_F)
 
     with pytest.raises(ValueError, match="out of range"):
         point_to_surface_distances(

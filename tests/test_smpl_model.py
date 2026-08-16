@@ -13,6 +13,7 @@ SMPL_DIR = "models/smpl"
 
 def _smpl_available() -> bool:
     from pathlib import Path
+
     return (Path(SMPL_DIR) / "SMPL_NEUTRAL.pkl").exists()
 
 
@@ -68,7 +69,7 @@ class TestSMPLModel:
         torch.cuda.synchronize()
         elapsed = (time.perf_counter() - start) / 10
 
-        assert elapsed < 0.05, f"Forward pass took {elapsed*1000:.1f}ms (limit: 50ms)"
+        assert elapsed < 0.05, f"Forward pass took {elapsed * 1000:.1f}ms (limit: 50ms)"
 
     def test_shoulder_width(self):
         """0.6: Joint regressor: shoulder width 35-45cm at neutral pose."""
@@ -101,7 +102,9 @@ class TestSMPLModel:
         """Model handles batch size > 1 via explicit params."""
         B = 4
         betas = torch.zeros(B, 10, device=self.model.device)
-        body_pose = torch.zeros(B, self.model.body_model.NUM_BODY_JOINTS * 3, device=self.model.device)
+        body_pose = torch.zeros(
+            B, self.model.body_model.NUM_BODY_JOINTS * 3, device=self.model.device
+        )
         global_orient = torch.zeros(B, 3, device=self.model.device)
         translation = torch.zeros(B, 3, device=self.model.device)
         scale = torch.ones(B, device=self.model.device)
@@ -124,6 +127,7 @@ class TestSMPLGenders:
     @pytest.mark.parametrize("gender", ["neutral", "male", "female"])
     def test_gender_loads(self, gender):
         from pathlib import Path
+
         model_path = Path(SMPL_DIR) / f"SMPL_{gender.upper()}.pkl"
         if not model_path.exists():
             pytest.skip(f"{model_path} not found")

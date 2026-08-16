@@ -122,8 +122,13 @@ class TestVertexMidpointReprojection:
         confs["view"][4] = 1.0
 
         loss = reprojection_loss(
-            joints, kp2d, confs, {"view": (R, t, K)}, COCO_TO_SMPL,
-            vertices_pred=verts, vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
+            joints,
+            kp2d,
+            confs,
+            {"view": (R, t, K)},
+            COCO_TO_SMPL,
+            vertices_pred=verts,
+            vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
         )
         assert float(loss) < 1e-4, f"expected ~0 when aligned, got {float(loss)}"
 
@@ -137,8 +142,13 @@ class TestVertexMidpointReprojection:
         confs["view"][4] = 1.0
 
         loss = reprojection_loss(
-            joints, kp2d, confs, {"view": (R, t, K)}, COCO_TO_SMPL,
-            vertices_pred=verts, vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
+            joints,
+            kp2d,
+            confs,
+            {"view": (R, t, K)},
+            COCO_TO_SMPL,
+            vertices_pred=verts,
+            vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
         )
         assert float(loss) > 1.0, f"expected penalty on offset, got {float(loss)}"
 
@@ -153,8 +163,13 @@ class TestVertexMidpointReprojection:
         confs["view"][4] = 1.0
 
         loss = reprojection_loss(
-            joints, kp2d, confs, {"view": (R, t, K)}, COCO_TO_SMPL,
-            vertices_pred=None, vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
+            joints,
+            kp2d,
+            confs,
+            {"view": (R, t, K)},
+            COCO_TO_SMPL,
+            vertices_pred=None,
+            vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
         )
         assert float(loss) == 0.0, f"no vertices → no term, got {float(loss)}"
 
@@ -170,8 +185,13 @@ class TestVertexMidpointReprojection:
         confs["view"][4] = 1.0
 
         loss = reprojection_loss(
-            joints, kp2d, confs, {"view": (R, t, K)}, COCO_TO_SMPL,
-            vertices_pred=verts, vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
+            joints,
+            kp2d,
+            confs,
+            {"view": (R, t, K)},
+            COCO_TO_SMPL,
+            vertices_pred=verts,
+            vertex_midpoint_to_smpl=HEAD_MIDPOINT_TO_VERTEX,
         )
         loss.backward()
         assert verts.grad is not None

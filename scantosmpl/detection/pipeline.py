@@ -7,8 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageDraw, ImageFont
 
 from scantosmpl.config import DetectionConfig
 from scantosmpl.detection.image_loader import LoadedImage, load_directory
@@ -16,11 +15,10 @@ from scantosmpl.detection.keypoint_detector import (
     COCO_KEYPOINT_NAMES,
     COCO_SKELETON,
     KeypointDetector,
-    KeypointResult,
 )
-from scantosmpl.detection.person_detector import Detection, PersonDetector
+from scantosmpl.detection.person_detector import PersonDetector
 from scantosmpl.detection.view_classifier import ViewClassifier
-from scantosmpl.types import CameraParams, ViewResult, ViewType
+from scantosmpl.types import ViewResult, ViewType
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +108,7 @@ class DetectionPipeline:
         Returns:
             List of ViewResult, one per image.
         """
-        loaded_images = load_directory(
-            image_dir, orientation_overrides=self.orientation_overrides
-        )
+        loaded_images = load_directory(image_dir, orientation_overrides=self.orientation_overrides)
         if not loaded_images:
             logger.warning("No images found in %s", image_dir)
             return []
@@ -120,16 +116,16 @@ class DetectionPipeline:
         logger.info("Processing %d images from %s", len(loaded_images), image_dir)
         results = []
         for i, loaded in enumerate(loaded_images):
-            logger.info(
-                "[%d/%d] %s", i + 1, len(loaded_images), loaded.path.name
-            )
+            logger.info("[%d/%d] %s", i + 1, len(loaded_images), loaded.path.name)
             result = self.process_image(loaded)
             results.append(result)
             logger.info(
                 "  -> %s (bbox_conf=%.2f, visible_kps=%d/17)",
                 result.view_type.value,
                 result.bbox[0] if result.bbox is not None else 0,  # just a placeholder
-                int((result.keypoint_confs > 0.3).sum()) if result.keypoint_confs is not None else 0,
+                int((result.keypoint_confs > 0.3).sum())
+                if result.keypoint_confs is not None
+                else 0,
             )
 
         # Summary
@@ -138,7 +134,9 @@ class DetectionPipeline:
             counts[r.view_type] += 1
         logger.info(
             "Detection complete: %d full-body, %d partial, %d skip",
-            counts[ViewType.FULL_BODY], counts[ViewType.PARTIAL], counts[ViewType.SKIP],
+            counts[ViewType.FULL_BODY],
+            counts[ViewType.PARTIAL],
+            counts[ViewType.SKIP],
         )
 
         # Debug output
@@ -203,9 +201,7 @@ class DetectionPipeline:
         ]
         for loaded, result in zip(loaded_images, results):
             n_vis = (
-                int((result.keypoint_confs > 0.3).sum())
-                if result.keypoint_confs is not None
-                else 0
+                int((result.keypoint_confs > 0.3).sum()) if result.keypoint_confs is not None else 0
             )
             summary_lines.append(
                 f"  {loaded.path.name}: {result.view_type.value} ({n_vis}/17 keypoints)"

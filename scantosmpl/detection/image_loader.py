@@ -10,7 +10,6 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 from PIL import Image, ImageOps
 
 from scantosmpl.types import CameraParams
@@ -84,7 +83,9 @@ def _focal_length_pixels(exif: dict, image_width: int) -> tuple[float, bool]:
         f_px = f_mm * image_width / sensor_width_mm
         logger.debug(
             "Intrinsics from FocalPlaneXRes: f=%.1fmm, sensor=%.2fmm -> f=%.1fpx",
-            f_mm, sensor_width_mm, f_px,
+            f_mm,
+            sensor_width_mm,
+            f_px,
         )
         return f_px, True
 
@@ -96,7 +97,9 @@ def _focal_length_pixels(exif: dict, image_width: int) -> tuple[float, bool]:
         f_px = f_mm * image_width / sensor_width_mm
         logger.debug(
             "Intrinsics from 35mm equiv: f=%.1fmm, f35=%.1fmm -> f=%.1fpx",
-            f_mm, float(f_35mm), f_px,
+            f_mm,
+            float(f_35mm),
+            f_px,
         )
         return f_px, True
 
@@ -104,7 +107,8 @@ def _focal_length_pixels(exif: dict, image_width: int) -> tuple[float, bool]:
     f_px = f_mm * image_width / 36.0
     logger.warning(
         "No sensor size in EXIF, assuming 36mm full-frame: f=%.1fmm -> f=%.1fpx",
-        f_mm, f_px,
+        f_mm,
+        f_px,
     )
     return f_px, False
 
@@ -123,7 +127,11 @@ def load_image(
     Returns:
         LoadedImage with normalised image and camera parameters.
     """
-    overrides = orientation_overrides if orientation_overrides is not None else DEFAULT_ORIENTATION_OVERRIDES
+    overrides = (
+        orientation_overrides
+        if orientation_overrides is not None
+        else DEFAULT_ORIENTATION_OVERRIDES
+    )
 
     img = Image.open(image_path)
     original_size = img.size  # (width, height) before any transforms

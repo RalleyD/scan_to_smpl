@@ -5,12 +5,11 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw
 from tqdm import tqdm
 
-from scantosmpl.detection.image_loader import load_image
-
 from scantosmpl.config import HMRConfig
+from scantosmpl.detection.image_loader import load_image
 from scantosmpl.hmr.camera_hmr import CameraHMRInference, HMROutput
 from scantosmpl.hmr.orientation import check_orientation_quality
 from scantosmpl.types import CameraParams, ViewResult, ViewType
@@ -158,7 +157,8 @@ class HMRPipeline:
                 v.hmr_suitable = self._assess_hmr_suitability(v)
 
         to_process = [
-            v for v in views
+            v
+            for v in views
             if v.view_type != ViewType.SKIP and v.bbox is not None and v.hmr_suitable
         ]
 
@@ -219,11 +219,13 @@ class HMRPipeline:
                     image,
                     output.vertices,
                     inference.smpl_faces,
-                    np.array([
-                        [focal_length_px, 0.0, W / 2.0],
-                        [0.0, focal_length_px, H / 2.0],
-                        [0.0, 0.0, 1.0],
-                    ]),
+                    np.array(
+                        [
+                            [focal_length_px, 0.0, W / 2.0],
+                            [0.0, focal_length_px, H / 2.0],
+                            [0.0, 0.0, 1.0],
+                        ]
+                    ),
                     output.cam_translation,
                     overlay_path,
                 )
@@ -268,8 +270,8 @@ class HMRPipeline:
         W, H = image.size
 
         # Project all vertices
-        pts_h = (K @ v.T).T                             # (6890, 3)
-        pts_2d = pts_h[:, :2] / (pts_h[:, 2:3] + 1e-9) # (6890, 2)
+        pts_h = (K @ v.T).T  # (6890, 3)
+        pts_2d = pts_h[:, :2] / (pts_h[:, 2:3] + 1e-9)  # (6890, 2)
 
         # --- Face shading: grey semi-transparent filled polygons ---
         f = np.asarray(faces)
@@ -282,8 +284,9 @@ class HMRPipeline:
         v0 = pts_2d[vis_faces[:, 0]]
         v1 = pts_2d[vis_faces[:, 1]]
         v2 = pts_2d[vis_faces[:, 2]]
-        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) \
-              - (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+        cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - (v1[:, 1] - v0[:, 1]) * (
+            v2[:, 0] - v0[:, 0]
+        )
         vis_faces = vis_faces[cross > 0]
 
         # Painter's algorithm: draw far faces first so near faces paint over them
@@ -295,19 +298,21 @@ class HMRPipeline:
         layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
 
-        GREY = (160, 160, 160, 110)   # semi-transparent grey fill
-        margin = 200                   # allow slightly off-screen polys
+        GREY = (160, 160, 160, 110)  # semi-transparent grey fill
+        margin = 200  # allow slightly off-screen polys
         for face in vis_faces:
             p0 = (float(pts_2d[face[0], 0]), float(pts_2d[face[0], 1]))
             p1 = (float(pts_2d[face[1], 0]), float(pts_2d[face[1], 1]))
             p2 = (float(pts_2d[face[2], 0]), float(pts_2d[face[2], 1]))
-            if all(-margin <= p[0] <= W + margin and -margin <= p[1] <= H + margin
-                   for p in (p0, p1, p2)):
+            if all(
+                -margin <= p[0] <= W + margin and -margin <= p[1] <= H + margin
+                for p in (p0, p1, p2)
+            ):
                 draw.polygon([p0, p1, p2], fill=GREY)
 
         # --- Edge drawing: purple ---
         mesh = trimesh.Trimesh(vertices=v, faces=faces, process=False)
-        edges = mesh.edges_unique                              # (E, 2)
+        edges = mesh.edges_unique  # (E, 2)
         both_front = (v_z[edges[:, 0]] > 0.01) & (v_z[edges[:, 1]] > 0.01)
         edges = edges[both_front]
 
@@ -362,7 +367,7 @@ class HMRPipeline:
             "=" * 72,
             "",
             f"Total views processed : {len(hmr_outputs)}",
-            f"Views skipped (unsuitable): "
+            "Views skipped (unsuitable): "
             + (", ".join(v.image_path.name for v in views if not v.hmr_suitable) or "none"),
             f"Elapsed               : {elapsed:.1f}s",
             f"  ({elapsed / max(len(hmr_outputs), 1):.1f}s per image)",
@@ -387,9 +392,7 @@ class HMRPipeline:
                     f"  {name:<25}  {exif:>10.2f}°  {flnet:>10.2f}°  {diff:>7.2f}°  {ok:>6}"
                 )
             else:
-                lines.append(
-                    f"  {name:<25}  {exif:>10.2f}°  {'N/A':>10}  {'N/A':>8}  {'N/A':>6}"
-                )
+                lines.append(f"  {name:<25}  {exif:>10.2f}°  {'N/A':>10}  {'N/A':>8}  {'N/A':>6}")
 
         if fov_diffs:
             lines += [
@@ -406,8 +409,7 @@ class HMRPipeline:
             "Shape Parameter (β) Statistics:",
             f"  Mean   : {np.mean(betas_all, axis=0).round(3).tolist()}",
             f"  Std    : {np.std(betas_all, axis=0).round(3).tolist()}",
-            f"  Max std: {float(np.std(betas_all, axis=0).max()):.3f}  "
-            f"(criterion 2.5: < 1.0)",
+            f"  Max std: {float(np.std(betas_all, axis=0).max()):.3f}  (criterion 2.5: < 1.0)",
         ]
 
         # Pose variance (body_pose norm)
@@ -430,9 +432,7 @@ class HMRPipeline:
                 img = load_image(img_path).image if img_path.exists() else None
                 hw = (img.height, img.width) if img is not None else (1000, 1000)
                 confs = view.keypoint_confs if view.keypoint_confs is not None else np.zeros(17)
-                quality = check_orientation_quality(
-                    out.global_orient, view.keypoints_2d, confs, hw
-                )
+                quality = check_orientation_quality(out.global_orient, view.keypoints_2d, confs, hw)
                 status = "OK" if quality.score >= 0.67 else "WARN"
                 warn_str = "; ".join(quality.warnings) if quality.warnings else "none"
                 lines.append(f"  {name:<25}  score={quality.score:.2f}  [{status}]  {warn_str}")
@@ -444,13 +444,14 @@ class HMRPipeline:
             f.write("\n".join(lines) + "\n")
 
         print(f"[HMR] Debug output written to {debug_dir}/")
-        print(f"      summary.txt — FoV table, β stats, orientation flags")
-        print(f"      hmr_results.json — per-image SMPL parameters")
+        print("      summary.txt — FoV table, β stats, orientation flags")
+        print("      hmr_results.json — per-image SMPL parameters")
 
 
 # ------------------------------------------------------------------
 # Utility
 # ------------------------------------------------------------------
+
 
 def _default_focal(image: Image.Image) -> float:
     """Fallback focal length: assume 50mm equivalent on 35mm sensor."""

@@ -79,7 +79,9 @@ def _robust_mean(
     else:
         w = weights.to(device=residuals.device, dtype=residuals.dtype)
         if w.shape != residuals.shape:
-            raise ValueError(f"weights shape {tuple(w.shape)} != residual shape {tuple(residuals.shape)}")
+            raise ValueError(
+                f"weights shape {tuple(w.shape)} != residual shape {tuple(residuals.shape)}"
+            )
 
     if trim_quantile < 1.0 and residuals.numel() > 1:
         cutoff = torch.quantile(residuals.detach().float(), trim_quantile)
@@ -141,13 +143,13 @@ def chamfer_loss(
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
 
     n_points = pts.shape[0]
-    mesh_to_cloud: torch.Tensor | None = None      # (V,) running minimum
+    mesh_to_cloud: torch.Tensor | None = None  # (V,) running minimum
     cloud_to_mesh_chunks: list[torch.Tensor] = []  # each (chunk,)
 
     for start in range(0, n_points, chunk_size):
-        chunk = pts[start : start + chunk_size]              # (C, 3)
-        dist = torch.cdist(verts, chunk)                     # (V, C) — the ONE matrix
-        chunk_min_per_vertex = dist.min(dim=1).values        # (V,)  mesh -> cloud
+        chunk = pts[start : start + chunk_size]  # (C, 3)
+        dist = torch.cdist(verts, chunk)  # (V, C) — the ONE matrix
+        chunk_min_per_vertex = dist.min(dim=1).values  # (V,)  mesh -> cloud
         cloud_to_mesh_chunks.append(dist.min(dim=0).values)  # (C,)  cloud -> mesh
         mesh_to_cloud = (
             chunk_min_per_vertex
@@ -156,7 +158,7 @@ def chamfer_loss(
         )
 
     assert mesh_to_cloud is not None  # non-empty cloud guaranteed above
-    cloud_to_mesh = torch.cat(cloud_to_mesh_chunks)          # (N,)
+    cloud_to_mesh = torch.cat(cloud_to_mesh_chunks)  # (N,)
 
     loss_m2c = _robust_mean(mesh_to_cloud, vertex_weights, huber_delta, trim_quantile)
     loss_c2m = _robust_mean(cloud_to_mesh, cloud_weights, huber_delta, trim_quantile)
@@ -181,7 +183,7 @@ def _vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor
     v2 = vertices[faces_long[:, 2]]
     # Cross-product magnitude is twice the triangle area, so accumulating the
     # un-normalised face normal weights each face by its area.
-    face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)      # (F, 3)
+    face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)  # (F, 3)
 
     normals = torch.zeros_like(vertices)
     for k in range(3):
@@ -223,7 +225,7 @@ def normal_consistency_loss(
             f"cloud_normals shape {tuple(nrm.shape)} != cloud shape {tuple(pts.shape)}"
         )
 
-    vert_normals = _vertex_normals(verts, faces)             # (V, 3)
+    vert_normals = _vertex_normals(verts, faces)  # (V, 3)
     nrm = nrm / nrm.norm(dim=1, keepdim=True).clamp(min=_EPS)
 
     total = verts.new_zeros(())
@@ -293,9 +295,7 @@ def build_uniform_laplacian(faces: np.ndarray, n_verts: int) -> torch.Tensor:
     return laplacian
 
 
-def laplacian_smoothing_loss(
-    displacements: torch.Tensor, laplacian: torch.Tensor
-) -> torch.Tensor:
+def laplacian_smoothing_loss(displacements: torch.Tensor, laplacian: torch.Tensor) -> torch.Tensor:
     """Mean squared magnitude of `L @ D` — the *roughness* of the field, not its size.
 
     Penalising `L @ D` rather than `D` lets a smooth soft-tissue bulge survive
@@ -318,7 +318,7 @@ def laplacian_smoothing_loss(
         raise ValueError(
             f"laplacian is ({lap.shape[0]}, {lap.shape[1]}) but D has {disp.shape[0]} vertices"
         )
-    smoothed = torch.sparse.mm(lap, disp)                    # (V, 3)
+    smoothed = torch.sparse.mm(lap, disp)  # (V, 3)
     return (smoothed**2).sum(dim=1).mean()
 
 

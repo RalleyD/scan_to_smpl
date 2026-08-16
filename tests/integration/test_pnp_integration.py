@@ -92,7 +92,9 @@ def consensus_result(hmr_views):
     smpl_model = Path("models/smpl/SMPL_NEUTRAL.pkl")
     builder = ConsensusBuilder(smpl_model, device="cuda")
     result = builder.build_consensus(
-        hmr_views, debug_dir=CONSENSUS_DIR, image_dir=DATA_DIR,
+        hmr_views,
+        debug_dir=CONSENSUS_DIR,
+        image_dir=DATA_DIR,
     )
     return result
 
@@ -107,7 +109,10 @@ def calibration_result(hmr_views, consensus_result):
     pipeline = CalibrationPipeline(config)
     debug_dir = Path("output/debug/calibration")
     result = pipeline.calibrate(
-        hmr_views, consensus_result, DATA_DIR, debug_dir=debug_dir,
+        hmr_views,
+        consensus_result,
+        DATA_DIR,
+        debug_dir=debug_dir,
     )
     return result
 
@@ -128,15 +133,14 @@ class TestDensePnPSuccess:
         # Count total dense-attempted views (success + failure for dense or fallback types)
         dense_types = {"dense_138", "dense_sparse_fallback"}
         total_dense = n_dense + sum(
-            1 for r in calibration_result.pnp_results.values()
+            1
+            for r in calibration_result.pnp_results.values()
             if not r.success and r.correspondence_type in dense_types
         )
         if total_dense == 0:
             pytest.skip("No dense views processed")
         rate = n_dense / total_dense
-        assert rate >= 0.9, (
-            f"Dense PnP success rate {rate:.0%} ({n_dense}/{total_dense}) < 90%"
-        )
+        assert rate >= 0.9, f"Dense PnP success rate {rate:.0%} ({n_dense}/{total_dense}) < 90%"
 
 
 # ---------------------------------------------------------------------------
@@ -149,15 +153,14 @@ class TestSparsePnPSuccess:
         """Criterion 4.2: PnP succeeds on >= 50% of sparse views (>= 3/6)."""
         n_sparse = calibration_result.n_views_sparse
         total_sparse = n_sparse + sum(
-            1 for r in calibration_result.pnp_results.values()
+            1
+            for r in calibration_result.pnp_results.values()
             if not r.success and r.correspondence_type == "sparse_coco"
         )
         if total_sparse == 0:
             pytest.skip("No sparse views processed")
         rate = n_sparse / total_sparse
-        assert rate >= 0.5, (
-            f"Sparse PnP success rate {rate:.0%} ({n_sparse}/{total_sparse}) < 50%"
-        )
+        assert rate >= 0.5, f"Sparse PnP success rate {rate:.0%} ({n_sparse}/{total_sparse}) < 50%"
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +227,7 @@ class TestFocalPerturbation:
             perturbed_views = []
             for v in hmr_views:
                 import copy
+
                 pv = copy.copy(v)
                 pv.camera = CameraParams(
                     focal_length=v.camera.focal_length * factor,
@@ -234,20 +238,19 @@ class TestFocalPerturbation:
                 perturbed_views.append(pv)
 
             result = pipeline.calibrate(
-                perturbed_views, consensus_result, DATA_DIR,
+                perturbed_views,
+                consensus_result,
+                DATA_DIR,
             )
 
             # Should still get >= 70% of dense views (including sparse fallback)
             dense_types = {"dense_138", "dense_sparse_fallback"}
             total_dense = sum(
-                1 for r in result.pnp_results.values()
-                if r.correspondence_type in dense_types
+                1 for r in result.pnp_results.values() if r.correspondence_type in dense_types
             )
             if total_dense > 0:
                 rate = result.n_views_dense / total_dense
-                assert rate >= 0.7, (
-                    f"Focal {label}: dense success {rate:.0%} < 70%"
-                )
+                assert rate >= 0.7, f"Focal {label}: dense success {rate:.0%} < 70%"
 
 
 # ---------------------------------------------------------------------------
@@ -277,18 +280,12 @@ class TestDenseVsSparse:
 class TestExtrinsicsStored:
     def test_extrinsics_stored_in_views(self, hmr_views, calibration_result):
         """Solved views should have rotation and translation in their CameraParams."""
-        solved_names = {
-            n for n, r in calibration_result.pnp_results.items() if r.success
-        }
+        solved_names = {n for n, r in calibration_result.pnp_results.items() if r.success}
         for view in hmr_views:
             name = view.image_path.name
             if name in solved_names and view.camera is not None:
-                assert view.camera.rotation is not None, (
-                    f"{name}: rotation not stored"
-                )
-                assert view.camera.translation is not None, (
-                    f"{name}: translation not stored"
-                )
+                assert view.camera.rotation is not None, f"{name}: rotation not stored"
+                assert view.camera.translation is not None, f"{name}: translation not stored"
                 assert view.camera.rotation.shape == (3, 3)
                 assert view.camera.translation.shape == (3,)
 

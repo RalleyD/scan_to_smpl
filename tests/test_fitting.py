@@ -1,7 +1,6 @@
 """Unit tests for Phase 5 loss functions (no GPU required)."""
 
 import numpy as np
-import pytest
 import torch
 
 from scantosmpl.fitting.losses import (
@@ -11,10 +10,19 @@ from scantosmpl.fitting.losses import (
     shape_regularisation,
 )
 
-
 COCO_TO_SMPL = {
-    5: 16, 6: 17, 7: 18, 8: 19, 9: 20, 10: 21,
-    11: 1, 12: 2, 13: 4, 14: 5, 15: 7, 16: 8,
+    5: 16,
+    6: 17,
+    7: 18,
+    8: 19,
+    9: 20,
+    10: 21,
+    11: 1,
+    12: 2,
+    13: 4,
+    14: 5,
+    15: 7,
+    16: 8,
 }
 
 
@@ -42,8 +50,8 @@ class TestJointLoss:
     def test_huber_linear_for_outlier(self):
         """Huber should be sub-quadratic for large errors (outlier regime)."""
         target = torch.zeros(1, 3)
-        pred_small = torch.tensor([[[0.01, 0.0, 0.0]]])    # inside delta
-        pred_large = torch.tensor([[[10.0, 0.0, 0.0]]])    # outside delta (huber_delta=0.05)
+        pred_small = torch.tensor([[[0.01, 0.0, 0.0]]])  # inside delta
+        pred_large = torch.tensor([[[10.0, 0.0, 0.0]]])  # outside delta (huber_delta=0.05)
 
         l_small = float(joint_loss(pred_small, target))
         l_large = float(joint_loss(pred_large, target))

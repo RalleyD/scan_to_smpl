@@ -41,11 +41,9 @@ class HMRConfig:
 
     backend: Literal["camerahmr"] = "camerahmr"
     device: str = "cuda"
-    checkpoint_path: Path = Path(
-        "models/checkpoints/camera_hmr/camerahmr_checkpoint_cleaned.ckpt")
+    checkpoint_path: Path = Path("models/checkpoints/camera_hmr/camerahmr_checkpoint_cleaned.ckpt")
     densekp_path: Path = Path("models/checkpoints/camera_hmr/densekp.ckpt")
-    cam_model_path: Path = Path(
-        "models/checkpoints/camera_hmr/cam_model_cleaned.ckpt")
+    cam_model_path: Path = Path("models/checkpoints/camera_hmr/cam_model_cleaned.ckpt")
     smpl_mean_params_path: Path = Path("models/smpl/smpl_mean_params.npz")
     smpl_model_path: Path = Path("models/smpl/SMPL_NEUTRAL.pkl")
     crop_size: int = 256
@@ -59,10 +57,10 @@ class HMRConfig:
 class ConsensusConfig:
     """Multi-view consensus configuration (Phase 3 / Tier 1)."""
 
-    trim_fraction: float = 0.1       # fraction to trim from each tail for robust mean
-    frechet_max_iter: int = 50       # SO(3) mean max iterations
-    frechet_tol: float = 1e-7        # convergence tolerance
-    min_views: int = 3               # minimum views required for consensus
+    trim_fraction: float = 0.1  # fraction to trim from each tail for robust mean
+    frechet_max_iter: int = 50  # SO(3) mean max iterations
+    frechet_tol: float = 1e-7  # convergence tolerance
+    min_views: int = 3  # minimum views required for consensus
     save_debug: bool = True
     debug_dir: Path = Path("output/debug/consensus")
 
@@ -75,8 +73,8 @@ class CalibrationConfig:
     # pixels — generous for consensus mesh error (~32mm PA-MPJPE)
     ransac_threshold: float = 105.0
     ransac_iterations: int = 5000
-    min_inliers: int = 20          # dense views
-    min_inliers_sparse: int = 6    # sparse views
+    min_inliers: int = 20  # dense views
+    min_inliers_sparse: int = 6  # sparse views
     use_dense_keypoints: bool = True  # 138 CameraHMR surface keypoints
     dense_conf_threshold: float = 0.3
     sparse_conf_threshold: float = 0.3
@@ -108,14 +106,16 @@ class FittingConfig:
     w_laplacian: float = 0.1
 
     # Body-part weights for chamfer
-    body_part_weights: dict[str, float] = field(default_factory=lambda: {
-        "torso": 1.0,
-        "arms": 0.7,
-        "legs": 0.7,
-        "head": 0.5,
-        "hands": 0.3,
-        "feet": 0.4,
-    })
+    body_part_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "torso": 1.0,
+            "arms": 0.7,
+            "legs": 0.7,
+            "head": 0.5,
+            "hands": 0.3,
+            "feet": 0.4,
+        }
+    )
 
 
 @dataclass
@@ -125,7 +125,7 @@ class Phase5Config:
     # Triangulation
     # min ViTPose confidence to include a view
     triangulation_conf_threshold: float = 0.3
-    triangulation_min_views: int = 3             # min views required per joint
+    triangulation_min_views: int = 3  # min views required per joint
     # px — RANSAC inlier threshold (ViTPose noise ~50px on 6000px images)
     ransac_reproj_threshold: float = 100.0
     ransac_iterations: int = 100

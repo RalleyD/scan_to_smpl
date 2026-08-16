@@ -11,8 +11,7 @@ import torch
 from PIL import Image
 
 from scantosmpl.hmr.camera_hmr import CameraHMRInference, HMROutput
-from scantosmpl.hmr.orientation import OrientationQuality, check_orientation_quality
-
+from scantosmpl.hmr.orientation import check_orientation_quality
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -233,9 +232,9 @@ class TestOrientationQuality:
         kps = np.zeros((17, 2), dtype=np.float32)
         confs = np.zeros(17, dtype=np.float32)
 
-        kps[0] = [400, nose_y]   # nose
-        kps[11] = [380, hip_y]   # left hip
-        kps[12] = [420, hip_y]   # right hip
+        kps[0] = [400, nose_y]  # nose
+        kps[11] = [380, hip_y]  # left hip
+        kps[12] = [420, hip_y]  # right hip
         confs[0] = confs[11] = confs[12] = 0.9
         return kps, confs
 
@@ -270,15 +269,22 @@ class TestOrientationQuality:
         kps = np.zeros((17, 2), dtype=np.float32)
         confs = np.zeros(17, dtype=np.float32)
 
-        kps[0] = [400, 100]; confs[0] = 0.9   # nose
-        kps[11] = [380, 600]; confs[11] = 0.9  # left hip
-        kps[12] = [420, 600]; confs[12] = 0.9  # right hip
+        kps[0] = [400, 100]
+        confs[0] = 0.9  # nose
+        kps[11] = [380, 600]
+        confs[11] = 0.9  # left hip
+        kps[12] = [420, 600]
+        confs[12] = 0.9  # right hip
 
         # Arms roughly horizontal (T-pose): elbows near shoulder height
-        kps[5] = [200, 300]; confs[5] = 0.9   # left shoulder
-        kps[7] = [100, 310]; confs[7] = 0.9   # left elbow
-        kps[6] = [600, 300]; confs[6] = 0.9   # right shoulder
-        kps[8] = [700, 295]; confs[8] = 0.9   # right elbow
+        kps[5] = [200, 300]
+        confs[5] = 0.9  # left shoulder
+        kps[7] = [100, 310]
+        confs[7] = 0.9  # left elbow
+        kps[6] = [600, 300]
+        confs[6] = 0.9  # right shoulder
+        kps[8] = [700, 295]
+        confs[8] = 0.9  # right elbow
 
         go = np.array([0.0, 0.0, 0.0])
         quality = check_orientation_quality(go, kps, confs, (1000, 800))
