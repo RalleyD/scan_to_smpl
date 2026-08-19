@@ -3,9 +3,21 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
+
+# --- Tier 3 / PSD-boundary constants (master §5.1) -------------------------
+#
+# `D` (per-vertex displacement) is always persisted in the SAME frame the SMPL
+# forward pass returns: posed, world, AFTER LBS and AFTER the global scale.
+# This is master D4 — PSD applies `R_v(theta)^-1` itself; Tier 3 does not.
+DISPLACEMENT_FRAME: Literal["posed_world"] = "posed_world"
+
+#: Fixed SMPL (not SMPL-X) topology throughout this feature — master §8.
+SMPL_NUM_VERTICES: int = 6890
+SMPL_NUM_FACES: int = 13776
 
 
 class ViewType(Enum):
@@ -108,6 +120,65 @@ class FittingResult:
 
     # Per-vertex displacements (Tier 3, optional)
     displacements: np.ndarray | None = None  # (6890, 3)
+    # Frame `displacements` is expressed in (master D4/7.B3) — self-describing
+    # in memory, mirroring the explicit field written to disk by
+    # `scantosmpl.fitting.artefacts.write_pose_artefacts`.
+    displacement_frame: str = DISPLACEMENT_FRAME
 
     # Per-view cameras (Tier 2+)
     cameras: dict[str, CameraParams] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 / PSD-boundary types (master §5.1) — the ONLY cross-tier types this
+# feature adds to the shared contract. Everything else (CloudAlignment,
+# SurfaceFitResult, ChamferReport, ...) is a module-local result dataclass
+# living beside its own module, per the repo convention.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Tier3Quality:
+    """Per-pose fit quality persisted alongside `D` (7.B7).
+
+    All `*_mm` fields are millimetres (the single unit-conversion boundary —
+    see `scantosmpl.evaluation.surface_metrics`). `pa_mpjpe_mm` and
+    `median_reproj_px` are carried through from Tier 2's own metrics when
+    present; `None` when Tier 2 did not record them (AC20's documented
+    exception to "every field populated").
+    """
+
+    chamfer_cloud_to_mesh_mean_mm: float
+    chamfer_cloud_to_mesh_median_mm: float
+    chamfer_cloud_to_mesh_rms_mm: float
+    chamfer_mesh_to_cloud_mean_mm: float
+    chamfer_mesh_to_cloud_median_mm: float
+    chamfer_mesh_to_cloud_rms_mm: float
+    tessellation_floor_mean_mm: float
+    tessellation_floor_max_mm: float
+    icp_inlier_rmse_mm: float
+    icp_fitness: float
+    displacement_mean_mm: float
+    displacement_p95_mm: float
+    pa_mpjpe_mm: float | None = None  # carried from Tier 2
+    median_reproj_px: float | None = None  # carried from Tier 2
+
+
+@dataclass
+class PoseArtefact:
+    """One pose's entry in the corpus manifest (7.B6, 7.B8).
+
+    `oracle_only=True` marks a pose fitted purely as a PSD evaluation
+    ceiling — it MUST NOT enter PSD training (7.B8). `betas_locked` mirrors
+    `SurfaceFitResult.betas_locked` for this specific pose, so a manifest
+    reader can tell a `--lock-betas` run apart from a `--lock-betas`-free
+    (β-refinement) run without opening `smpl_params.npz` (master D10).
+    """
+
+    pose_name: str
+    directory: str  # relative to the manifest, e.g. "t-pose"
+    oracle_only: bool
+    betas_locked: bool
+    has_displacements: bool
+    has_pointcloud: bool
+    quality: Tier3Quality

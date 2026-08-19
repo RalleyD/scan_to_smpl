@@ -187,6 +187,60 @@ class Phase5Config:
 
 
 @dataclass
+class Tier3Config:
+    """Tier 3: point-cloud surface refinement configuration (master §5.2).
+
+    Supersedes `FittingConfig.body_part_weights` / `w_chamfer` / `w_normal` /
+    `w_laplacian` for Tier 3 — those fields stay on `FittingConfig` unused
+    (Tier 2 compatibility), this dataclass is what `scantosmpl.pointcloud`,
+    `scantosmpl.evaluation.surface_metrics` and `scantosmpl.fitting.surface`
+    actually read (each declares a structural `*ConfigLike` Protocol this
+    dataclass satisfies, so none of them import this module directly).
+    """
+
+    # --- Preprocessing (unit-free, D8) ---
+    outlier_nb_neighbors: int = 20
+    outlier_std_ratio: float = 2.0
+    target_points: int = 50_000  # after downsample; 0 = keep all
+    voxel_fraction_of_bbox: float = 0.002  # voxel = fraction * bbox diagonal (source units)
+    estimate_normals: bool = True
+    normal_knn: int = 30
+
+    # --- Alignment (S1) ---
+    icp_max_iterations: int = 100
+    icp_threshold_frac: float = 0.05  # correspondence distance as fraction of SMPL bbox diagonal
+    icp_min_fitness: float = 0.5  # below this, alignment is reported as not converged
+
+    # --- Fitting (S2/S3) ---
+    lock_betas: bool = False  # 7.B1
+    betas_source: Path | None = None  # smpl_params.npz of the reference-pose fit
+    chamfer_chunk_size: int = 10_000
+    chamfer_huber_delta_m: float = 0.02
+    chamfer_trim_quantile: float = 0.95  # drop the worst 5% of per-point residuals (cloud outliers)
+    body_part_weights: dict[str, float] = field(
+        default_factory=lambda: {
+            "torso": 1.0,
+            "arms": 0.7,
+            "legs": 0.7,
+            "head": 0.5,
+            "hands": 0.3,
+            "feet": 0.4,
+        }
+    )
+    use_semantic_weighting: bool = True  # False => uniform, for the AC 7.3 A/B
+
+    # --- Metric (7.M) ---
+    tessellation_floor_samples: int = 100_000
+    tessellation_floor_seed: int = 0
+
+    # --- Output ---
+    subject_id: str = "subject"
+    oracle_only: bool = False  # 7.B8
+    save_debug: bool = True
+    debug_dir: Path = Path("output/debug/surface")
+
+
+@dataclass
 class PipelineConfig:
     """Top-level pipeline configuration."""
 
@@ -210,6 +264,7 @@ class PipelineConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     fitting: FittingConfig = field(default_factory=FittingConfig)
     phase5: Phase5Config = field(default_factory=Phase5Config)
+    tier3: Tier3Config = field(default_factory=Tier3Config)
 
     # Device
     device: str = "cuda"

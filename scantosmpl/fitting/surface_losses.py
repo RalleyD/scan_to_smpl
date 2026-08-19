@@ -18,6 +18,7 @@ Design notes (master spec §2):
 """
 
 import hashlib
+from typing import cast
 
 import numpy as np
 import torch
@@ -188,7 +189,8 @@ def _vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor
     normals = torch.zeros_like(vertices)
     for k in range(3):
         normals = normals.index_add(0, faces_long[:, k], face_normals)
-    return normals / normals.norm(dim=1, keepdim=True).clamp(min=_EPS)
+    # `.norm(...)` is untyped (Any) in the torch stubs; the result is always a Tensor.
+    return cast(torch.Tensor, normals / normals.norm(dim=1, keepdim=True).clamp(min=_EPS))
 
 
 def normal_consistency_loss(
@@ -263,7 +265,10 @@ def build_uniform_laplacian(faces: np.ndarray, n_verts: int) -> torch.Tensor:
     if faces_arr.ndim != 2 or faces_arr.shape[1] != 3:
         raise ValueError(f"faces must be (F, 3); got {faces_arr.shape}")
 
-    key = (hashlib.sha1(np.ascontiguousarray(faces_arr, dtype=np.int64)).hexdigest(), n_verts)
+    key = (
+        hashlib.sha1(np.ascontiguousarray(faces_arr, dtype=np.int64).tobytes()).hexdigest(),
+        n_verts,
+    )
     cached = _LAPLACIAN_CACHE.get(key)
     if cached is not None:
         return cached
@@ -319,7 +324,8 @@ def laplacian_smoothing_loss(displacements: torch.Tensor, laplacian: torch.Tenso
             f"laplacian is ({lap.shape[0]}, {lap.shape[1]}) but D has {disp.shape[0]} vertices"
         )
     smoothed = torch.sparse.mm(lap, disp)  # (V, 3)
-    return (smoothed**2).sum(dim=1).mean()
+    # `.mean()` on a 0-d reduction is untyped (Any) in the torch stubs.
+    return cast(torch.Tensor, (smoothed**2).sum(dim=1).mean())
 
 
 def displacement_regularisation(displacements: torch.Tensor) -> torch.Tensor:

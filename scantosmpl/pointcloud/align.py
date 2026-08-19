@@ -73,7 +73,7 @@ class CloudAlignment:
         pts = np.asarray(points, dtype=np.float64)
         if pts.ndim != 2 or pts.shape[1] != 3:
             raise ValueError(f"points must be (N, 3), got {pts.shape}")
-        return self.scale * (pts @ self.rotation.T) + self.translation
+        return np.asarray(self.scale * (pts @ self.rotation.T) + self.translation, dtype=np.float64)
 
     def as_matrix(self) -> np.ndarray:
         """(4, 4) float64 homogeneous form of the same similarity."""

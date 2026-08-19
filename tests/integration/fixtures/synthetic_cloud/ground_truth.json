@@ -1,0 +1,78 @@
+{
+  "seed": 0,
+  "n_inliers": 60000,
+  "n_surface_samples": 60000,
+  "n_outliers": 1200,
+  "n_total_points": 61200,
+  "outlier_fraction": 0.0196078431372549,
+  "noise_sigma_m": 0.001,
+  "d_true": {
+    "offset_mm": 4.0,
+    "part": "torso",
+    "n_affected_vertices": 1752,
+    "n_total_vertices": 6890,
+    "mean_mm": 1.0171262699564585,
+    "max_mm": 4.000000000000001
+  },
+  "known_similarity_smpl_world_to_source": {
+    "scale": 0.371,
+    "rotation": [
+      [
+        -0.5723518310623078,
+        -0.8161410206328251,
+        0.07954379875284978
+      ],
+      [
+        0.2861347854432833,
+        -0.2896818389612189,
+        -0.9133516938919929
+      ],
+      [
+        0.7684661775504174,
+        -0.49999826661345226,
+        0.3993262667851859
+      ]
+    ],
+    "translation": [
+      1.7,
+      -0.4,
+      2.3
+    ],
+    "rotation_axis": [
+      0.3,
+      -0.5,
+      0.8
+    ],
+    "rotation_angle_deg": 137.0
+  },
+  "inverse_similarity_source_to_smpl_world": {
+    "scale": 2.6954177897574123,
+    "rotation": [
+      [
+        -0.5723518310623078,
+        0.2861347854432833,
+        0.7684661775504174
+      ],
+      [
+        -0.8161410206328251,
+        -0.2896818389612189,
+        -0.49999826661345226
+      ],
+      [
+        0.07954379875284978,
+        -0.9133516938919929,
+        0.3993262667851859
+      ]
+    ],
+    "translation": [
+      -1.8329384942930549,
+      6.527124023456214,
+      -3.8248397548317232
+    ]
+  },
+  "reference_mesh": {
+    "description": "Neutral SMPL mesh (betas=0, body_pose=0, global_orient=0, translation=0, scale=1) \u2014 reproducible from SMPLModel with no fixture-specific numbers. This mesh PLUS d_true is what the cloud (before noise/outliers/similarity) was sampled from.",
+    "gender": "neutral",
+    "num_betas": 10
+  }
+}

@@ -1,6 +1,7 @@
 """SMPL/SMPL-X model wrapper with differentiable forward pass."""
 
 from pathlib import Path
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -139,7 +140,9 @@ class SMPLModel(nn.Module):
 
     def get_joint_regressor(self) -> torch.Tensor:
         """Return the joint regressor matrix (J_regressor)."""
-        return self.body_model.J_regressor
+        # smplx ships no type stubs, so J_regressor is untyped (Any) from mypy's
+        # perspective even though it is always a torch.Tensor at runtime.
+        return cast(torch.Tensor, self.body_model.J_regressor)
 
     def set_params(
         self,
