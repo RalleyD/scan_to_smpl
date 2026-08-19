@@ -1,16 +1,19 @@
 # Loop state — `tier3-surface-refinement`
 
-**Paused 2026-08-16, mid Phase 1.** Cause: Anthropic session usage limit (resets 02:30
-Europe/London). Not a code, spec or environment failure. Delete this file once the loop converges.
+**Paused 2026-08-19, end of Phase 1.** Cause: user requested a pause to free up the session for
+another task — not a code, spec, or environment failure. Delete this file once the loop converges.
 
 ## Where the loop got to
 
 | Phase | Status |
 |---|---|
 | 0 — Parse | ✅ 5 components, 24 acceptance criteria, no `Owns` collisions |
-| 1 — Implement (3 parallel worktree briefs) | ⏸ **partial**, see below |
-| 1 — Implement (2 serial briefs) | ⛔ not started |
+| 1 — Implement (all 5 briefs) | ✅ **complete** — 5/5 `BUILD_RESULT`s collected 2026-08-16→19. 4 `done`, 1 `blocked` (`tier3-pipeline-artefacts`, real cross-component defect found — see `HANDOFF.md` §3). All work committed on `main` at `8f314dd`. |
 | 2 — Integrate → Review → Fix | ⛔ not started (`iter = 0`, `maxIterations = 3`) |
+
+**Resume point: [HANDOFF.md](HANDOFF.md) §4 — Phase 2a Integrate is the next call to make.**
+That file carries all five `BUILD_RESULT` blocks verbatim plus a synthesized list of
+cross-cutting findings (§3) so Integrate/Review don't need to re-derive them from scratch.
 
 ## Surviving work — do NOT restart these from scratch
 
@@ -55,16 +58,24 @@ step 1.
      chamfer at 6890 × 50 000, measured on the *other* torch build. Those need re-measuring, and
      AC13's 60 s budget derives from them.
 
-2. **The spec set is untracked, so fresh worktrees do not contain it.** `docs/features/tier3-surface-refinement/`
-   was absent from all three worktrees; it has been copied into each. **Committing the spec set to
-   `main` would prevent this recurring** for the two serial briefs and any future worktree.
+2. ~~**The spec set is untracked, so fresh worktrees do not contain it.**~~ **RESOLVED** — the spec
+   set is committed at `1eb3307`, so any new worktree now inherits it automatically. The three
+   existing worktrees still carry the manually-copied copy, which is harmless.
 
-3. **`.claude/settings.json` was widened and hardened.** Added to `allow`: `Edit`, `Write`,
-   `Bash(cd *)`, `Bash(git *)`, `Bash(sha256sum *)`, `Bash(…/smpl_psd_venv/bin/python -m *)`. Added a
-   `deny` block covering every `pip install` spelling, every venv-creation route, and `.venv/bin/*`.
-   `deny` beats `allow`, so the pre-existing `Bash(pip install:*)` allow entry is now dead — as are
-   the `.venv/bin/ruff`, `.venv/bin/mypy` and `source .venv/bin/activate` entries. They were left in
-   place rather than deleted.
+3. **`.claude/settings.json` was widened, and the `deny` block was subsequently trimmed.** Added to
+   `allow`: `Edit`, `Write`, `Bash(cd *)`, `Bash(git *)`, `Bash(sha256sum *)`,
+   `Bash(…/smpl_psd_venv/bin/python -m *)`. The `deny` list as it now stands covers only
+   path-qualified installs (`*/pip install:*`, `*/pip3 install:*`, `uv pip install:*`) and
+   venv creation (`*python -m venv:*`, `*python3 -m venv:*`, `uv venv:*`, `conda create:*`).
+   **It does NOT cover** bare `Bash(pip install:*)` — which remains on the *allow* list —
+   nor `python -m pip install`, `source .venv/bin/activate`, or `.venv/bin/*`. So the
+   "pyenv venv only, never install" rule is **instruction-enforced for subagents, not
+   config-enforced**. Every prompt must state it explicitly; see `HANDOFF.md` §0.2.
+
+4. **Agent model routing does not come from role-file frontmatter.** `.claude/agents/` does not
+   exist, so `python-engineer` / `integration-engineer` / `reviewer` are not registered subagent
+   types — their files are pasted as prompt text into `general-purpose`, making the `model:` line
+   inert. Pass `model` as a parameter on the `Agent` call. See `HANDOFF.md` §0.1.
 
 ## Orchestrator deviation in force
 
@@ -75,12 +86,17 @@ briefs' own frontmatter encodes and it should be preserved on resume.
 
 ## Resume procedure
 
-1. `SendMessage` to each of the three ids above: re-read the brief, re-run every verification from
-   step 1, return only `BUILD_RESULT`.
-2. When all three return `done`, merge the three worktree branches into `main`.
-3. Serial: `surface-fitting`, then `tier3-pipeline-artefacts` (both `worktree: false`, run in the
-   main tree).
-4. Phase 2: Integrate → Review → Fix, `maxIterations = 3`.
+**See [HANDOFF.md](HANDOFF.md)** — it carries the paste-ready prompt for every component and both
+Phase 2 roles, with model routing, the interpreter rules, and the surviving-work inventory.
+
+The resume topology changed after this file was first written. The original plan below assumed
+`SendMessage` resume of the three live agents to preserve their transcripts. That is superseded:
+those transcripts are large and expensive to replay, and the build role is now routed to Sonnet,
+so `HANDOFF.md` §1 Path A instead **commits and merges the three partial worktree branches into
+`main` and runs cold agents serially against the merged tree**. Cold agents lose nothing that
+matters — the code is on disk and every verification has to be re-run from step 1 either way.
+
+~~1. `SendMessage` to each of the three ids above…~~ superseded; see `HANDOFF.md` §1.
 
 Role prompts to paste verbatim: `.claude/loop-engineering/agents/{python-engineer,integration-engineer,reviewer}.md`.
 Review criteria: `.claude/loop-engineering/skills/review-pr/review-criteria-{core,scantosmpl}.md`.
