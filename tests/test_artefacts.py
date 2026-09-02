@@ -10,6 +10,15 @@ of 7.B4's "reordering cannot slip through" guarantee) is fully testable without 
 model weights. Exactly one test (`test_real_smpl_faces_match_template_constant`,
 `requires_smpl`) ties the hard-coded constant to genuine SMPL topology loaded from
 `models/smpl/`.
+
+`TestTier3PipelineSanityGates` at the bottom tests the four write-time sanity gates
+added to `scantosmpl.fitting.surface_pipeline` for a P1 review finding (iteration 1):
+a catastrophically wrong fit (e.g. a scale-collapsed S1 alignment) was previously
+written to disk unconditionally and reported as a success. Those gates operate on
+plain dataclasses (`CloudAlignment`, `ChamferReport`, `Tier3Quality`) that need no
+SMPL weights to construct, so they get the same fast, always-run, failing-path-first
+treatment as the 7.B assertions above — this file, not the (`requires_smpl`,
+`requires_fixture`) integration tests, is where that is cheaply exhaustive.
 """
 
 from __future__ import annotations
@@ -20,6 +29,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from scantosmpl.config import Tier3Config
+from scantosmpl.evaluation.surface_metrics import ChamferReport
 from scantosmpl.fitting import artefacts
 from scantosmpl.fitting.artefacts import (
     SMPL_TEMPLATE_FACES_SHA256,
@@ -29,6 +40,13 @@ from scantosmpl.fitting.artefacts import (
     write_pose_artefacts,
 )
 from scantosmpl.fitting.surface import SurfaceFitResult
+from scantosmpl.fitting.surface_pipeline import (
+    Tier3SanityError,
+    _check_alignment_converged,
+    _check_chamfer_asymmetry,
+    _check_displacement_bound,
+    _check_scale_deviation,
+)
 from scantosmpl.pointcloud.align import CloudAlignment
 from scantosmpl.types import (
     DISPLACEMENT_FRAME,
@@ -84,6 +102,7 @@ def _dummy_alignment(**overrides) -> CloudAlignment:
         n_candidates=24,
         candidate_index=3,
         converged=True,
+        scale_init=0.5,  # matches `scale` by default -- "no deviation"
     )
     base.update(overrides)
     return CloudAlignment(**base)
@@ -678,3 +697,142 @@ class TestLoadLockedBetas:
         np.savez(path, betas=np.zeros(5))
         with pytest.raises(ValueError, match=r"\(10,\)"):
             load_locked_betas(path)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 write-time sanity gates (P1 review finding, iteration 1) —
+# `scantosmpl.fitting.surface_pipeline`. These are pure functions over plain
+# dataclasses (no SMPL weights needed), so — like the rest of this file — every
+# gate gets a happy-path AND a failing-path test, using the exact numbers from the
+# review finding's observed regression where a concrete example is available.
+# ---------------------------------------------------------------------------
+
+
+def _dummy_chamfer_report(**overrides) -> ChamferReport:
+    cloud_to_mesh = {"mean": 2.0, "median": 1.8, "rms": 2.5, "p95": 4.0, "max": 6.0}
+    mesh_to_cloud = {"mean": 3.0, "median": 2.8, "rms": 3.5, "p95": 5.0, "max": 7.0}
+    cloud_to_mesh.update(overrides.pop("cloud_to_mesh_mm", {}))
+    mesh_to_cloud.update(overrides.pop("mesh_to_cloud_mm", {}))
+    report = ChamferReport(cloud_to_mesh_mm=cloud_to_mesh, mesh_to_cloud_mm=mesh_to_cloud)
+    for key, value in overrides.items():
+        setattr(report, key, value)
+    return report
+
+
+class TestCheckAlignmentConverged:
+    """Gate 1 — `CloudAlignment.converged` (`fitness >= cfg.icp_min_fitness`) was
+    already computed by `align_cloud_to_smpl` but was never read anywhere outside
+    that module: a non-convergent S1 alignment still ran S2/S3 and wrote a full
+    artefact set. A tiny-cloud probe in the review returned `converged=False`
+    (`fitness=0.400`)."""
+
+    def test_converged_passes(self):
+        _check_alignment_converged(_dummy_alignment(converged=True), Tier3Config())
+
+    def test_not_converged_raises(self):
+        alignment = _dummy_alignment(converged=False, fitness=0.4)
+        with pytest.raises(Tier3SanityError, match="did not converge"):
+            _check_alignment_converged(alignment, Tier3Config())
+
+
+class TestCheckScaleDeviation:
+    """Gate 2 — `CloudAlignment.scale` must stay within
+    `cfg.max_scale_deviation_factor`x of `CloudAlignment.scale_init`, the
+    independent PCA-initial estimate `align_cloud_to_smpl` itself already
+    computes to seed ICP (simplify pass, iteration 1: this used to recompute
+    that estimate a second time via `pca_triad`; now it just reads the field)."""
+
+    def test_scale_close_to_pca_init_passes(self):
+        alignment = _dummy_alignment(scale=2.0, scale_init=2.0)
+        _check_scale_deviation(alignment, Tier3Config())
+
+    def test_collapsed_scale_raises(self):
+        """The observed regression: `alignment.scale=0.062100` against an expected
+        recoverable scale of ~2.695 (the fixture's known inverse similarity) — a
+        ~43x collapse."""
+        collapsed = _dummy_alignment(scale=2.695 / 43.0, scale_init=2.695)
+        with pytest.raises(Tier3SanityError, match="departs from"):
+            _check_scale_deviation(collapsed, Tier3Config())
+
+    def test_exploded_scale_raises(self):
+        exploded = _dummy_alignment(scale=2.0 * 50.0, scale_init=2.0)
+        with pytest.raises(Tier3SanityError, match="departs from"):
+            _check_scale_deviation(exploded, Tier3Config())
+
+    def test_configurable_bound_widens_tolerance(self):
+        alignment = _dummy_alignment(scale=2.0 * 4.0, scale_init=2.0)  # 4x off
+        tight_cfg = Tier3Config(max_scale_deviation_factor=3.0)
+        loose_cfg = Tier3Config(max_scale_deviation_factor=5.0)
+        with pytest.raises(Tier3SanityError):
+            _check_scale_deviation(alignment, tight_cfg)
+        _check_scale_deviation(alignment, loose_cfg)  # passes
+
+
+class TestCheckChamferAsymmetry:
+    """Gate 3 — the one-sided-collapse signature. `mesh_to_cloud_mm` was computed
+    per 7.M3 but never asserted against `cloud_to_mesh_mm` anywhere — exactly what
+    let a 204mm displacement field read as a 95.6% 'success' in the review."""
+
+    def test_symmetric_report_passes(self):
+        report = _dummy_chamfer_report(
+            cloud_to_mesh_mm={"mean": 5.0}, mesh_to_cloud_mm={"mean": 6.0}
+        )
+        _check_chamfer_asymmetry(report, Tier3Config())
+
+    def test_observed_regression_ratio_raises(self):
+        """The observed regression: `chamfer_cloud_to_mesh_mean_mm=0.068`,
+        `chamfer_mesh_to_cloud_mean_mm=172.33` — a ~2500x asymmetry."""
+        report = _dummy_chamfer_report(
+            cloud_to_mesh_mm={"mean": 0.068}, mesh_to_cloud_mm={"mean": 172.33}
+        )
+        with pytest.raises(Tier3SanityError, match="one-sided asymmetry"):
+            _check_chamfer_asymmetry(report, Tier3Config())
+
+    def test_mirrored_exploded_ratio_raises(self):
+        """The mirror-image failure (an exploded/oversized mesh): cloud_to_mesh
+        explodes while mesh_to_cloud stays small. Equally plausible as the
+        collapse case, and the gate must catch it in this direction too."""
+        report = _dummy_chamfer_report(
+            cloud_to_mesh_mm={"mean": 150.0}, mesh_to_cloud_mm={"mean": 0.06}
+        )
+        with pytest.raises(Tier3SanityError, match="one-sided asymmetry"):
+            _check_chamfer_asymmetry(report, Tier3Config())
+
+    def test_just_under_bound_passes(self):
+        cfg = Tier3Config(max_chamfer_asymmetry_ratio=15.0)
+        report = _dummy_chamfer_report(
+            cloud_to_mesh_mm={"mean": 1.0}, mesh_to_cloud_mm={"mean": 14.9}
+        )
+        _check_chamfer_asymmetry(report, cfg)
+
+    def test_just_over_bound_raises(self):
+        cfg = Tier3Config(max_chamfer_asymmetry_ratio=15.0)
+        report = _dummy_chamfer_report(
+            cloud_to_mesh_mm={"mean": 1.0}, mesh_to_cloud_mm={"mean": 15.1}
+        )
+        with pytest.raises(Tier3SanityError):
+            _check_chamfer_asymmetry(report, cfg)
+
+
+class TestCheckDisplacementBound:
+    """Gate 4 — mean `|D|` beyond a physically-plausible clothing/surface-detail
+    bound. `D` is off-manifold detail (REVIEW.md 7.6's own target: <=5mm), never
+    alignment or shape slack (master R2)."""
+
+    def test_plausible_displacement_passes(self):
+        quality = _dummy_quality(displacement_mean_mm=3.0)
+        _check_displacement_bound(quality, Tier3Config())
+
+    def test_observed_regression_displacement_raises(self):
+        """The observed regression measured `displacement_mean_mm=204.11`."""
+        quality = _dummy_quality(displacement_mean_mm=204.11)
+        with pytest.raises(Tier3SanityError, match=r"mean \|D\|"):
+            _check_displacement_bound(quality, Tier3Config())
+
+    def test_configurable_bound(self):
+        quality = _dummy_quality(displacement_mean_mm=25.0)
+        tight_cfg = Tier3Config(max_displacement_mean_mm=20.0)
+        loose_cfg = Tier3Config(max_displacement_mean_mm=30.0)
+        with pytest.raises(Tier3SanityError):
+            _check_displacement_bound(quality, tight_cfg)
+        _check_displacement_bound(quality, loose_cfg)  # passes

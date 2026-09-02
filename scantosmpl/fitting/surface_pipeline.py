@@ -1,6 +1,6 @@
-"""Tier 3 orchestrator (master §4, §5.3): load -> preprocess -> align (S1) ->
-`Tier3SurfaceFitter.fit` (S2, S3) -> `chamfer_report` -> `Tier3Quality` -> persist ->
-`update_manifest`.
+"""Tier 3 orchestrator (master §4, §5.3): load -> preprocess -> align (S1) -> sanity
+gates 1+2 -> `Tier3SurfaceFitter.fit` (S2, S3) -> `chamfer_report` -> `Tier3Quality` ->
+sanity gates 3+4 -> persist -> `update_manifest`.
 
 This module wires together the four sibling deliverables (`scantosmpl.pointcloud`,
 `scantosmpl.evaluation.surface_metrics`, `scantosmpl.fitting.surface_losses`,
@@ -12,6 +12,15 @@ artefacts`) into one runnable tier. It never writes back into Tier 2's own artef
 only seeded randomness anywhere downstream of it is `tessellation_floor`'s surface
 sampler (seeded via `Tier3Config.tessellation_floor_seed`), which lives in
 `scantosmpl.evaluation.surface_metrics` and is called through `chamfer_report`.
+
+`Tier3Pipeline.run` also owns four write-time SANITY GATES (`Tier3SanityError`, P1
+review finding, iteration 1) that sit strictly upstream of the 7.B artefact-write
+assertions in `scantosmpl.fitting.artefacts`: 7.B's assertions guarantee a written
+artefact is *structurally* well-formed (right shape/dtype/topology); these gates
+guarantee it is not *semantically* garbage (a converged-looking, well-formed, but
+catastrophically misaligned or displacement-poisoned fit) before a single byte is
+written or a manifest entry created. See `Tier3SanityError`'s docstring for the four
+checks.
 """
 
 from __future__ import annotations
@@ -58,6 +67,157 @@ REAL_CLOUD_TO_MESH_MEAN_MM_TARGET = 8.0
 
 #: AC8's minimum improvement of the refined fit over the Tier-2-params, D=0 baseline.
 AC8_MIN_IMPROVEMENT_FRACTION = 0.40
+
+
+class Tier3SanityError(RuntimeError):
+    """A write-time sanity gate rejected this fit BEFORE it was persisted.
+
+    P1 review finding (iteration 1): a catastrophically wrong fit (e.g. a
+    scale-collapsed S1 alignment) was previously written to disk unconditionally,
+    entered into the corpus manifest with `has_displacements=True`, and reported as
+    a success (`>=40%` improvement, `PASS`-reading numbers) in `summary.txt` — every
+    signal that would have exposed the failure (`chamfer_mesh_to_cloud_mean_mm`,
+    `alignment.converged`) was computed but never actually asserted on anywhere.
+
+    `Tier3Pipeline.run` raises this — and writes NOTHING (no artefact directory, no
+    manifest entry, no `summary.txt`) — from four checks, mirroring the 7.B
+    enforcement layer's "fail loudly, don't silently corrupt a downstream consumer"
+    posture one tier earlier (before any write is even attempted):
+      1. `_check_alignment_converged`   — `CloudAlignment.converged is False`.
+      2. `_check_scale_deviation`       — `CloudAlignment.scale` far from the
+         PCA-initial scale estimate that seeds ICP.
+      3. `_check_chamfer_asymmetry`     — `mesh_to_cloud` and `cloud_to_mesh` means
+         disagree by more than `cfg.max_chamfer_asymmetry_ratio` (the one-sided
+         collapse signature).
+      4. `_check_displacement_bound`    — mean `|D|` exceeds
+         `cfg.max_displacement_mean_mm` (D is off-manifold surface detail, not
+         alignment/shape slack).
+    """
+
+
+def _check_alignment_converged(alignment: CloudAlignment, cfg: Tier3Config) -> None:
+    """Gate 1 — `CloudAlignment.converged` (`fitness >= cfg.icp_min_fitness`) is
+    already computed for free by `align_cloud_to_smpl`; this is the one place it is
+    actually read. Runs immediately after S1, before S2/S3, so a non-convergent
+    alignment never pays for the (much more expensive) surface optimisation either.
+
+    Raises:
+        Tier3SanityError: If `alignment.converged` is False.
+    """
+    if not alignment.converged:
+        raise Tier3SanityError(
+            f"S1 alignment did not converge (fitness={alignment.fitness:.3f} < "
+            f"icp_min_fitness={cfg.icp_min_fitness:.3f}, inlier_rmse="
+            f"{alignment.inlier_rmse_m * 1000.0:.1f}mm, candidate="
+            f"{alignment.candidate_index}/{alignment.n_candidates}) — refusing to "
+            "run S2/S3 or persist artefacts from an S1 alignment this unreliable. "
+            "Every downstream number (D, chamfer, quality.json) would be built on a "
+            "cloud that is not actually registered to the SMPL mesh."
+        )
+
+
+def _ratio_exceeds_bound(ratio: float, bound: float) -> bool:
+    """True if `ratio` (or its reciprocal) exceeds `bound` — a symmetric
+    "too far from 1.0 in either direction" test shared by gates 2 and 3."""
+    return ratio > bound or ratio < 1.0 / bound
+
+
+def _check_scale_deviation(alignment: CloudAlignment, cfg: Tier3Config) -> None:
+    """Gate 2 — `CloudAlignment.scale` must stay within
+    `cfg.max_scale_deviation_factor`x of `alignment.scale_init`, the PCA
+    ratio-of-extents estimate `align_cloud_to_smpl` itself already computed to
+    seed ICP and gate its own candidate selection.
+
+    ICP's scaled point-to-point stage (`with_scaling=True`) can walk the scale to a
+    collapsed/degenerate solution when the wrong rotation candidate happens to win
+    the inlier-RMSE comparison (master D9/R4); PCA's coarse estimate is an
+    independent sanity anchor that never depends on ICP's own correspondence
+    search, so it cannot fail the same way. This gate re-checks the same bound
+    `align_cloud_to_smpl` already enforced internally — defense in depth, not
+    redundancy: that internal check only ever *warns* and falls back to the
+    best-scoring candidate anyway when every candidate fails it (see that
+    module's docstring), whereas this is the hard, write-blocking enforcement.
+
+    Raises:
+        Tier3SanityError: If the ratio `alignment.scale / alignment.scale_init`
+            (or its reciprocal) exceeds `cfg.max_scale_deviation_factor`.
+    """
+    scale_init = alignment.scale_init
+    if scale_init <= 0.0 or alignment.scale <= 0.0:
+        return  # degenerate extents — align_cloud_to_smpl itself already raises here
+    ratio = alignment.scale / scale_init
+    bound = cfg.max_scale_deviation_factor
+    if _ratio_exceeds_bound(ratio, bound):
+        raise Tier3SanityError(
+            f"CloudAlignment.scale={alignment.scale:.6g} departs from the "
+            f"PCA-initial scale estimate {scale_init:.6g} by {ratio:.3g}x (bound "
+            f"{bound:.1f}x) — ICP with_scaling=True likely converged to a "
+            "collapsed/degenerate solution. Refusing to run S2/S3 or persist "
+            "artefacts."
+        )
+
+
+def _check_chamfer_asymmetry(report: ChamferReport, cfg: Tier3Config) -> None:
+    """Gate 3 — `mesh_to_cloud_mm["mean"]` and `cloud_to_mesh_mm["mean"]` must not
+    disagree by more than `cfg.max_chamfer_asymmetry_ratio`, in EITHER direction.
+
+    A one-sided collapse (e.g. the fitted mesh shrinks toward its own centroid, or
+    the cloud gets squashed into a tiny region by a collapsed alignment scale)
+    makes `cloud_to_mesh` read as excellent — a tiny mesh can still pass close to
+    many cloud points by coincidence — while `mesh_to_cloud` explodes, because most
+    of the mesh's own surface is then nowhere near the cloud (the observed
+    regression: `cloud_to_mesh_mean_mm=0.068`, `mesh_to_cloud_mean_mm=172.33`). The
+    mirror-image failure (an exploded/oversized mesh, or a cloud that ends up
+    embedded deep inside a too-large mesh) is equally plausible and produces the
+    same signature with the ratio flipped, so both directions are checked. A
+    healthy fit's two directions differ by sampling-density noise only; this is
+    exactly the asymmetry `chamfer_mesh_to_cloud_mean_mm` was designed to expose
+    (7.M3/7.M4) but that no caller previously asserted on.
+
+    Raises:
+        Tier3SanityError: If `mesh_to_cloud_mm["mean"] / cloud_to_mesh_mm["mean"]`
+            (or its reciprocal) exceeds `cfg.max_chamfer_asymmetry_ratio`.
+    """
+    c2m = report.cloud_to_mesh_mm.get("mean", 0.0)
+    m2c = report.mesh_to_cloud_mm.get("mean", 0.0)
+    bound = cfg.max_chamfer_asymmetry_ratio
+    if c2m <= 0.0 or m2c <= 0.0:
+        return
+    ratio = m2c / c2m
+    if _ratio_exceeds_bound(ratio, bound):
+        raise Tier3SanityError(
+            f"mesh_to_cloud mean ({m2c:.2f}mm) and cloud_to_mesh mean ({c2m:.2f}mm) "
+            f"disagree by {max(ratio, 1.0 / ratio):.1f}x (bound {bound:.1f}x) — this "
+            "one-sided asymmetry is the signature of a collapsed/degenerate (or "
+            "exploded) fit: one direction can read as excellent while the other "
+            "shows most of the mesh/cloud has no nearby counterpart. Refusing to "
+            "persist artefacts."
+        )
+
+
+def _check_displacement_bound(quality: Tier3Quality, cfg: Tier3Config) -> None:
+    """Gate 4 — mean `|D|` must not exceed `cfg.max_displacement_mean_mm`.
+
+    `D` is meant to absorb off-manifold surface/clothing detail only (REVIEW.md
+    7.6's own target: <= 5mm) — never alignment or shape slack (master R2). A mean
+    `|D|` of tens of centimetres (the observed regression: 204mm) is not "detailed
+    clothing"; it is a symptom of upstream alignment/shape error being silently
+    laundered into what a downstream PSD consumer would train on as a plausible
+    displacement field.
+
+    Raises:
+        Tier3SanityError: If `quality.displacement_mean_mm` exceeds
+            `cfg.max_displacement_mean_mm`.
+    """
+    bound = cfg.max_displacement_mean_mm
+    if quality.displacement_mean_mm > bound:
+        raise Tier3SanityError(
+            f"mean |D| = {quality.displacement_mean_mm:.2f}mm exceeds the "
+            f"physically-plausible clothing/surface-detail bound {bound:.1f}mm — "
+            "refusing to persist a displacement field this large as off-manifold "
+            "detail; it is far more likely to be absorbing alignment or shape "
+            "error."
+        )
 
 
 @dataclass
@@ -126,6 +286,10 @@ class Tier3Pipeline:
 
         Raises:
             ValueError: `cfg.lock_betas` is set without `cfg.betas_source`.
+            Tier3SanityError: A write-time sanity gate rejected this fit — see
+                `Tier3SanityError`'s docstring for the four checks. Nothing is
+                written (no artefact directory, no manifest entry, no
+                `summary.txt`) when this is raised.
             AssertionError: Any 7.B artefact-write invariant is violated
                 (`scantosmpl.fitting.artefacts.write_pose_artefacts`).
         """
@@ -141,6 +305,11 @@ class Tier3Pipeline:
 
         # --- S1: align cloud -> SMPL (Tier 2's mesh; scale solved here, D6) -----
         aligned_cloud, alignment = align_cloud_to_smpl(cleaned_cloud, tier2.vertices, faces, cfg)
+
+        # --- sanity gates 1+2: catch a catastrophically wrong S1 BEFORE running
+        # S2/S3 or writing anything (Tier3SanityError; P1 review finding) --------
+        _check_alignment_converged(alignment, cfg)
+        _check_scale_deviation(alignment, cfg)
 
         # --- locked betas (7.B1 / D10), if requested ----------------------------
         locked_betas = self._load_locked_betas() if cfg.lock_betas else None
@@ -159,6 +328,11 @@ class Tier3Pipeline:
 
         # --- Tier3Quality (7.B7) --------------------------------------------------
         quality = self._build_quality(report, alignment, fit_result, tier2)
+
+        # --- sanity gates 3+4: the one-sided-collapse chamfer signature and an
+        # implausible mean |D| (Tier3SanityError; P1 review finding) -------------
+        _check_chamfer_asymmetry(report, cfg)
+        _check_displacement_bound(quality, cfg)
 
         # --- persist (7.B enforcement layer) --------------------------------------
         write_pose_artefacts(out_dir, fit_result, alignment, quality, faces, pose_name=pose_name)
@@ -298,12 +472,21 @@ class Tier3Pipeline:
         m2c = report.mesh_to_cloud_mm
         floor = report.tessellation_floor_mm
 
+        # AC8 is defined in terms of cloud->mesh only (master §10) — but that
+        # direction ALONE is exactly what let a 204mm-mean displacement field read
+        # as a 95.6% "success" in the P1 regression this gate layer fixes: a
+        # scale-collapsed fit's cloud->mesh number can look excellent while
+        # mesh->cloud simultaneously explodes. Report BOTH directions, before and
+        # after, every time — never the AC8 number alone.
         baseline_mean = baseline_report.cloud_to_mesh_mm["mean"]
+        baseline_mean_m2c = baseline_report.mesh_to_cloud_mm["mean"]
         final_mean = c2m["mean"]
+        final_mean_m2c = m2c["mean"]
         improvement_frac = (
             (baseline_mean - final_mean) / baseline_mean if baseline_mean > 0 else float("nan")
         )
         meets_ac8 = bool(improvement_frac >= AC8_MIN_IMPROVEMENT_FRACTION)
+        final_asymmetry_ratio = final_mean_m2c / final_mean if final_mean > 0 else float("nan")
 
         is_real = _is_real_scanner_data(pointcloud_path)
         if is_real:
@@ -353,13 +536,26 @@ class Tier3Pipeline:
             "irreducible offset; the point-to-surface number above does not.",
             "",
             "--- AC8: refined fit vs Tier-2-params baseline (D=0, no Tier 3 refinement) ---",
-            f"Baseline (Tier 2 params, D=0) cloud->mesh mean: {baseline_mean:.2f} mm",
-            f"Final (Tier 3 refined + D)    cloud->mesh mean: {final_mean:.2f} mm",
-            f"Improvement: {improvement_frac * 100.0:.1f}% (meets >=40% target: {meets_ac8})",
+            "  (both chamfer directions, never cloud->mesh alone — see gate 3 below)",
+            f"Baseline (Tier 2 params, D=0) cloud->mesh mean: {baseline_mean:.2f} mm | "
+            f"mesh->cloud mean: {baseline_mean_m2c:.2f} mm",
+            f"Final (Tier 3 refined + D)    cloud->mesh mean: {final_mean:.2f} mm | "
+            f"mesh->cloud mean: {final_mean_m2c:.2f} mm",
+            f"Improvement (cloud->mesh, the AC8-defined direction): "
+            f"{improvement_frac * 100.0:.1f}% (meets >=40% target: {meets_ac8})",
             "",
             "--- Displacement field D ---",
             f"mean |D|: {quality.displacement_mean_mm:.2f} mm",
             f"p95  |D|: {quality.displacement_p95_mm:.2f} mm",
+            "",
+            "--- Write-time sanity gates (P1 review finding; all four passed, or this "
+            "run would have raised Tier3SanityError and written nothing) ---",
+            f"1. Alignment converged:            {alignment.converged}",
+            f"2. Scale deviation bound:           {self.cfg.max_scale_deviation_factor:.1f}x",
+            f"3. Chamfer asymmetry (mesh->cloud / cloud->mesh, final): "
+            f"{final_asymmetry_ratio:.2f}x (bound {self.cfg.max_chamfer_asymmetry_ratio:.1f}x)",
+            f"4. Mean |D| bound:                   {self.cfg.max_displacement_mean_mm:.1f} mm "
+            f"(measured {quality.displacement_mean_mm:.2f} mm)",
             "",
             "--- Timing ---",
             f"S2+S3 wall clock: {elapsed_s:.1f}s",
@@ -386,8 +582,11 @@ class Tier3Pipeline:
                     "is_real_scanner_data": is_real,
                     "quality": asdict(quality),
                     "ac8_baseline_cloud_to_mesh_mean_mm": baseline_mean,
+                    "ac8_baseline_mesh_to_cloud_mean_mm": baseline_mean_m2c,
                     "ac8_final_cloud_to_mesh_mean_mm": final_mean,
+                    "ac8_final_mesh_to_cloud_mean_mm": final_mean_m2c,
                     "ac8_improvement_fraction": improvement_frac,
+                    "final_chamfer_asymmetry_ratio": final_asymmetry_ratio,
                     "elapsed_s": elapsed_s,
                 },
                 f,

@@ -35,7 +35,7 @@ from scantosmpl.fitting.surface_losses import (
     laplacian_smoothing_loss,
     normal_consistency_loss,
 )
-from scantosmpl.fitting.surface_pipeline import Tier3Pipeline, Tier3Result
+from scantosmpl.fitting.surface_pipeline import Tier3Pipeline, Tier3Result, Tier3SanityError
 
 __all__ = [
     "joint_loss",
@@ -63,6 +63,7 @@ __all__ = [
     # Tier 3 — orchestration + the 7.B artefact/manifest writer (tier3-pipeline-artefacts)
     "Tier3Pipeline",
     "Tier3Result",
+    "Tier3SanityError",
     "SMPL_TEMPLATE_FACES_SHA256",
     "faces_sha256",
     "write_pose_artefacts",

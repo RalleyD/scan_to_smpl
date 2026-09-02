@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from scantosmpl.fitting.surface_losses import (
+    _vertex_normals,
     build_uniform_laplacian,
     chamfer_loss,
     displacement_regularisation,
@@ -313,11 +314,19 @@ def _square_mesh() -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class TestNormalConsistencyLoss:
-    """`1 - |cos|` between each cloud normal and its nearest vertex normal."""
+    """`1 - |cos|` between each cloud normal and its nearest vertex normal.
+
+    The query point in these fixtures sits at (0.005, 0.005, 0) — close to
+    vertex 0 at the origin, well inside the trust-region radius
+    (`_NORMAL_TRUST_RADIUS_FRACTION` x the mesh's 1.0-unit edge length), so
+    its weight is nonzero and the single-point weighted mean reduces to the
+    unweighted per-point value regardless of the exact weight (AC12 fix;
+    see `TestNormalConsistencyTrustRegion` below for the weighting itself).
+    """
 
     def test_aligned_normals_give_zero_loss(self):
         vertices, faces = _square_mesh()
-        cloud = torch.tensor([[0.5, 0.5, 0.0]])
+        cloud = torch.tensor([[0.005, 0.005, 0.0]])
         cloud_normals = torch.tensor([[0.0, 0.0, 1.0]])
         loss = normal_consistency_loss(vertices, faces, cloud, cloud_normals)
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
@@ -326,14 +335,14 @@ class TestNormalConsistencyLoss:
         """Sign-agnostic by design: an inward-facing photogrammetry normal must
         not be penalised (module docstring / brief step 4)."""
         vertices, faces = _square_mesh()
-        cloud = torch.tensor([[0.5, 0.5, 0.0]])
+        cloud = torch.tensor([[0.005, 0.005, 0.0]])
         cloud_normals = torch.tensor([[0.0, 0.0, -1.0]])
         loss = normal_consistency_loss(vertices, faces, cloud, cloud_normals)
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_orthogonal_normals_give_loss_one(self):
         vertices, faces = _square_mesh()
-        cloud = torch.tensor([[0.5, 0.5, 0.0]])
+        cloud = torch.tensor([[0.005, 0.005, 0.0]])
         cloud_normals = torch.tensor([[1.0, 0.0, 0.0]])
         loss = normal_consistency_loss(vertices, faces, cloud, cloud_normals)
         assert loss.item() == pytest.approx(1.0, abs=1e-6)
@@ -344,6 +353,41 @@ class TestNormalConsistencyLoss:
         bad_normals = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]])
         with pytest.raises(ValueError):
             normal_consistency_loss(vertices, faces, cloud, bad_normals)
+
+
+class TestNormalConsistencyTrustRegion:
+    """AC12/AC18 fix: correspondences far from any vertex (relative to the
+    mesh's own edge length) go inert rather than contributing full weight —
+    that boundary band is exactly where nearest-vertex correspondence flips
+    between neighbours from one optimisation step to the next, which is what
+    made the unweighted term diverge under Adam (see module docstring)."""
+
+    def test_far_correspondence_is_inert(self):
+        """A point equidistant between two vertices (well outside the trust
+        radius of either) contributes ~zero weight, so an orthogonal normal
+        there barely moves the loss."""
+        vertices, faces = _square_mesh()
+        near_cloud = torch.tensor([[0.005, 0.005, 0.0]])
+        far_cloud = torch.tensor([[0.5, 0.5, 0.0]])  # equidistant from all 4 vertices
+        cloud_normals = torch.tensor([[1.0, 0.0, 0.0]])  # orthogonal to the mesh normal
+
+        loss_near = normal_consistency_loss(vertices, faces, near_cloud, cloud_normals)
+        loss_far = normal_consistency_loss(vertices, faces, far_cloud, cloud_normals)
+
+        assert loss_near.item() == pytest.approx(1.0, abs=1e-6)
+        assert loss_far.item() == pytest.approx(0.0, abs=1e-6)
+
+    def test_mixed_batch_weights_by_trust_not_uniformly(self):
+        """A near (trusted) and a far (untrusted) point disagree on normal
+        direction; the loss should sit close to the near point's own value,
+        not the unweighted average of the two."""
+        vertices, faces = _square_mesh()
+        cloud = torch.tensor([[0.005, 0.005, 0.0], [0.5, 0.5, 0.0]])
+        cloud_normals = torch.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])  # aligned, orthogonal
+        loss = normal_consistency_loss(vertices, faces, cloud, cloud_normals)
+        # Unweighted mean of {0.0, 1.0} would be 0.5; trust weighting must
+        # pull it well below that towards the near point's 0.0.
+        assert loss.item() < 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +470,72 @@ class TestDisplacementRegularisation:
         loss.backward()
         assert d.grad is not None
         assert torch.count_nonzero(d.grad) > 0
+
+
+# ---------------------------------------------------------------------------
+# Determinism (AC18 / master D12) — no stochastic step in the production path
+# ---------------------------------------------------------------------------
+
+
+@requires_smpl
+class TestDeterminism:
+    """Two identical runs of a full S3-shaped optimisation loop must produce
+    bit-for-bit identical displacements.
+
+    Regression coverage for `_vertex_normals`'s previous `index_add_`-based
+    accumulation, whose CUDA `atomicAdd` accumulation order is
+    documented-nondeterministic (differs run-to-run at the 1e-7/1e-8 level
+    per call, amplified to millimetres of displacement over an Adam
+    schedule — see module docstring). `_face_vertex_incidence` +
+    `torch.sparse.mm` replaces it.
+    """
+
+    @staticmethod
+    def _run(n_iters: int = 40) -> torch.Tensor:
+        model = SMPLModel(model_dir=SMPL_DIR, gender="neutral", device=DEVICE)
+        faces_np = model.body_model.faces.astype(np.int64)
+        faces_t = torch.as_tensor(faces_np, dtype=torch.long, device=DEVICE)
+
+        with torch.no_grad():
+            base_verts = model().vertices.squeeze(0)
+
+        gen = torch.Generator(device="cpu").manual_seed(0)
+        offset = (torch.randn(SMPLModel.NUM_VERTICES, 3, generator=gen) * 0.003).to(DEVICE)
+        cloud = base_verts + offset
+        with torch.no_grad():
+            cloud_normals = _vertex_normals(cloud, faces_t)
+
+        laplacian = build_uniform_laplacian(faces_np, SMPLModel.NUM_VERTICES).to(DEVICE)
+
+        model.zero_grad(set_to_none=True)
+        model.displacements.requires_grad_(True)
+        for p in (
+            model.betas,
+            model.body_pose,
+            model.global_orient,
+            model.translation,
+            model.scale,
+        ):
+            p.requires_grad_(False)
+
+        optimiser = torch.optim.Adam([model.displacements], lr=1e-3)
+        for _ in range(n_iters):
+            optimiser.zero_grad()
+            verts = model().vertices.squeeze(0)
+            chamfer, _ = chamfer_loss(verts, cloud, huber_delta=0.02, trim_quantile=0.95)
+            normal = normal_consistency_loss(verts, faces_t, cloud, cloud_normals)
+            lap = laplacian_smoothing_loss(model.displacements, laplacian)
+            reg = displacement_regularisation(model.displacements)
+            # Mirrors (does not import) DEFAULT_SURFACE_STAGES' shipped S3 weights.
+            loss = chamfer + 0.1 * normal + 0.1 * lap + 0.01 * reg
+            loss.backward()
+            optimiser.step()
+
+        return model.displacements.detach().clone()
+
+    def test_repeated_fit_is_bitwise_reproducible(self):
+        d1 = self._run()
+        d2 = self._run()
+        assert torch.equal(d1, d2), (
+            f"max abs diff {(d1 - d2).abs().max().item():.3e} across two identical runs"
+        )

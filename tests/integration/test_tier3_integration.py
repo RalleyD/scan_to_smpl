@@ -12,6 +12,7 @@ Run with:
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import time
@@ -22,12 +23,13 @@ import pytest
 import torch
 from scipy.spatial.transform import Rotation
 
+import scantosmpl.fitting.surface_pipeline as surface_pipeline_module
 from scantosmpl.cli import _load_tier2_result
 from scantosmpl.config import Tier3Config
 from scantosmpl.evaluation.surface_metrics import chamfer_report, point_to_surface_distances
 from scantosmpl.fitting.optimiser import RefinementResult
-from scantosmpl.fitting.surface import Tier3SurfaceFitter
-from scantosmpl.fitting.surface_pipeline import Tier3Pipeline
+from scantosmpl.fitting.surface import SurfaceFitResult, Tier3SurfaceFitter
+from scantosmpl.fitting.surface_pipeline import Tier3Pipeline, Tier3SanityError
 from scantosmpl.pointcloud.align import align_cloud_to_smpl
 from scantosmpl.pointcloud.io import PointCloud, load_pointcloud
 from scantosmpl.pointcloud.preprocess import preprocess_cloud
@@ -539,3 +541,191 @@ def test_similarity_invariance(smpl_model):
         f"D differs by {d_mean_diff_mm:.3f}mm mean between the two similarity-frame "
         f"re-runs — a transform has leaked into the displacement field (7.B5)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Write-time sanity gates (P1 review finding, iteration 1) — full
+# `Tier3Pipeline.run` wiring. `tests/test_artefacts.py` unit-tests the four gate
+# functions in isolation (no SMPL weights needed); these tests confirm they are
+# actually wired into `Tier3Pipeline.run` in the right place — BEFORE S2/S3 runs
+# and BEFORE any artefact/manifest write is attempted — using the internally
+# consistent `_perturbed_tier2` + `CLOUD_PATH` combo the rest of this file already
+# proves aligns/fits correctly (AC8 passes on this exact combo), so a gate firing
+# here is unambiguously the injected fault, not a pre-existing mismatch.
+#
+# NOTE on `converged`: at the time this was written, this repo's in-flight
+# `scantosmpl/pointcloud/align.py` (uncommitted, owned by the pointcloud-package
+# sibling brief) measures `fitness`/`converged` against a very tight FINAL polish
+# threshold (~2.7mm on this fixture) that `Tier3Config.icp_min_fitness`'s default
+# (0.5) was not calibrated against — `align_cloud_to_smpl` currently reports
+# `converged=False` (fitness ~0.05-0.09) even for an alignment AC8's own test
+# confirms is otherwise good (scale within ~0.5%, chamfer improves >90%). This is
+# a pre-existing, unrelated issue outside this brief's ownership (see BUILD_RESULT
+# notes) — every test below that needs a genuinely CONVERGED alignment to isolate
+# gates 2-4 forces `converged=True` on the real, otherwise-untouched
+# `CloudAlignment` via `dataclasses.replace`, rather than depending on that
+# calibration. `test_pipeline_refuses_on_non_convergent_alignment` (gate 1) is
+# unaffected by this either way, since it forces `converged=False` regardless.
+# ---------------------------------------------------------------------------
+
+
+def _assert_nothing_written(output_dir: Path, pose_name: str) -> None:
+    assert not (output_dir / pose_name).exists(), (
+        f"{output_dir / pose_name} was created — a rejected fit must not leave a "
+        "partial or complete artefact directory behind"
+    )
+    assert not (output_dir / "manifest.json").exists(), (
+        "manifest.json was created — a rejected fit must never enter the corpus manifest"
+    )
+
+
+def _force_converged(monkeypatch) -> None:
+    """Patch `align_cloud_to_smpl` (as imported into `surface_pipeline`) to force
+    `CloudAlignment.converged = True`, leaving scale/rotation/translation/fitness
+    exactly as the real ICP computed them. See the NOTE above this section."""
+
+    def _fake_align(cloud, mesh_vertices, faces, config):
+        aligned, real_alignment = align_cloud_to_smpl(cloud, mesh_vertices, faces, config)
+        return aligned, dataclasses.replace(real_alignment, converged=True)
+
+    monkeypatch.setattr(surface_pipeline_module, "align_cloud_to_smpl", _fake_align)
+
+
+@requires_smpl
+@requires_fixture
+def test_pipeline_writes_normally_on_healthy_fixture_run(smpl_model, tmp_path, monkeypatch):
+    """Happy path: with all four sanity gates wired in, a genuinely well-aligned
+    fit still runs S2/S3 and persists the full artefact set — the gates must not
+    false-positive on good data. Isolates gates 2-4 (plus the persist/manifest
+    path) from the pre-existing `converged` calibration issue noted above; gate 1
+    itself is exercised directly, unforced, by
+    `test_pipeline_refuses_on_non_convergent_alignment` below."""
+    tier2 = _perturbed_tier2(smpl_model, seed=7)
+    cfg = Tier3Config(
+        target_points=4000,
+        subject_id="gate-happy-path",
+        debug_dir=tmp_path / "debug",
+    )
+    _force_converged(monkeypatch)
+
+    pipeline = Tier3Pipeline(smpl_model, cfg)
+    output_dir = tmp_path / "fits"
+
+    result = pipeline.run(tier2, CLOUD_PATH, pose_name="t-pose", output_dir=output_dir)
+
+    assert (output_dir / "t-pose" / "smpl_params.npz").exists()
+    assert (output_dir / "t-pose" / "displacements.npz").exists()
+    assert (output_dir / "manifest.json").exists()
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert manifest["poses"][0]["pose_name"] == "t-pose"
+    assert result.quality.displacement_mean_mm < cfg.max_displacement_mean_mm
+
+
+@requires_smpl
+@requires_fixture
+def test_pipeline_refuses_on_non_convergent_alignment(smpl_model, tmp_path, monkeypatch):
+    """Gate 1 — a non-convergent S1 alignment must raise `Tier3SanityError` BEFORE
+    S2/S3 runs and BEFORE anything is written. Mirrors the review's tiny-cloud
+    probe (`converged=False`, `fitness=0.400`)."""
+    tier2 = _perturbed_tier2(smpl_model, seed=8)
+    cfg = Tier3Config(
+        target_points=4000, subject_id="gate-non-convergent", debug_dir=tmp_path / "debug"
+    )
+
+    def _fake_align(cloud, mesh_vertices, faces, config):
+        aligned, real_alignment = align_cloud_to_smpl(cloud, mesh_vertices, faces, config)
+        return aligned, dataclasses.replace(real_alignment, converged=False, fitness=0.4)
+
+    def _fail_if_called(self, *args, **kwargs):
+        raise AssertionError(
+            "Tier3SurfaceFitter.fit must not run when the S1 sanity gate rejects "
+            "the alignment (gate must fire before S2/S3, not after)"
+        )
+
+    monkeypatch.setattr(surface_pipeline_module, "align_cloud_to_smpl", _fake_align)
+    monkeypatch.setattr(Tier3SurfaceFitter, "fit", _fail_if_called)
+
+    pipeline = Tier3Pipeline(smpl_model, cfg)
+    output_dir = tmp_path / "fits"
+    with pytest.raises(Tier3SanityError, match="did not converge"):
+        pipeline.run(tier2, CLOUD_PATH, pose_name="t-pose", output_dir=output_dir)
+
+    _assert_nothing_written(output_dir, "t-pose")
+
+
+@requires_smpl
+@requires_fixture
+def test_pipeline_refuses_on_scale_collapsed_alignment(smpl_model, tmp_path, monkeypatch):
+    """Gate 2 — an alignment whose `scale` has collapsed far from the independent
+    PCA-initial estimate must raise `Tier3SanityError`, even when Open3D itself
+    reports `converged=True` (the exact P0 failure this gate exists to catch:
+    `alignment.scale=0.062100` vs an expected ~2.695, ICP's own fitness/RMSE
+    reported the collapsed candidate as a good fit)."""
+    tier2 = _perturbed_tier2(smpl_model, seed=9)
+    cfg = Tier3Config(
+        target_points=4000, subject_id="gate-scale-collapse", debug_dir=tmp_path / "debug"
+    )
+
+    def _fake_align(cloud, mesh_vertices, faces, config):
+        aligned, real_alignment = align_cloud_to_smpl(cloud, mesh_vertices, faces, config)
+        collapsed_scale = real_alignment.scale / 50.0
+        return aligned, dataclasses.replace(real_alignment, scale=collapsed_scale, converged=True)
+
+    def _fail_if_called(self, *args, **kwargs):
+        raise AssertionError(
+            "Tier3SurfaceFitter.fit must not run when the S1 sanity gate rejects "
+            "the alignment (gate must fire before S2/S3, not after)"
+        )
+
+    monkeypatch.setattr(surface_pipeline_module, "align_cloud_to_smpl", _fake_align)
+    monkeypatch.setattr(Tier3SurfaceFitter, "fit", _fail_if_called)
+
+    pipeline = Tier3Pipeline(smpl_model, cfg)
+    output_dir = tmp_path / "fits"
+    with pytest.raises(Tier3SanityError, match="departs from"):
+        pipeline.run(tier2, CLOUD_PATH, pose_name="t-pose", output_dir=output_dir)
+
+    _assert_nothing_written(output_dir, "t-pose")
+
+
+@requires_smpl
+@requires_fixture
+def test_pipeline_refuses_on_excessive_displacement(smpl_model, tmp_path, monkeypatch):
+    """Gate 4 — a `Tier3SurfaceFitter.fit` result whose mean `|D|` is far beyond a
+    plausible clothing/surface-detail bound must raise `Tier3SanityError` and
+    write nothing, even when S1 aligned fine (`converged` forced True — see the
+    NOTE above this section). `D` here is a uniform 200mm shift applied to every
+    vertex (deliberately NOT a shape collapse, so cloud->mesh and mesh->cloud stay
+    roughly symmetric — this isolates gate 4 from gate 3)."""
+    tier2 = _perturbed_tier2(smpl_model, seed=10)
+    cfg = Tier3Config(
+        target_points=4000, subject_id="gate-displacement", debug_dir=tmp_path / "debug"
+    )
+    _force_converged(monkeypatch)
+
+    def _fake_fit(self, tier2_arg, cloud, *, stages=None, locked_betas=None):
+        base_vertices = tier2_arg.vertices.astype(np.float32)
+        shift = np.array([0.0, 0.0, 0.2], dtype=np.float32)  # 200mm uniform shift
+        d = np.tile(shift, (base_vertices.shape[0], 1)).astype(np.float32)
+        return SurfaceFitResult(
+            betas=tier2_arg.betas,
+            body_pose=tier2_arg.body_pose,
+            global_orient=tier2_arg.global_orient,
+            translation=tier2_arg.translation,
+            scale=tier2_arg.scale,
+            displacements=d,
+            vertices=base_vertices + d,
+            base_vertices=base_vertices,
+            betas_locked=False,
+            loss_history={},
+            metrics={},
+        )
+
+    monkeypatch.setattr(Tier3SurfaceFitter, "fit", _fake_fit)
+
+    pipeline = Tier3Pipeline(smpl_model, cfg)
+    output_dir = tmp_path / "fits"
+    with pytest.raises(Tier3SanityError, match=r"mean \|D\|"):
+        pipeline.run(tier2, CLOUD_PATH, pose_name="t-pose", output_dir=output_dir)
+
+    _assert_nothing_written(output_dir, "t-pose")

@@ -233,6 +233,37 @@ class Tier3Config:
     tessellation_floor_samples: int = 100_000
     tessellation_floor_seed: int = 0
 
+    # --- Write-time sanity gates (P1 review finding, iteration 1) ---
+    # `Tier3Pipeline.run` refuses to run S2/S3 or persist artefacts when any of
+    # these are violated — see `scantosmpl.fitting.surface_pipeline`'s
+    # `_check_alignment_converged` / `_check_scale_deviation` /
+    # `_check_chamfer_asymmetry` / `_check_displacement_bound`. Without these, a
+    # catastrophically wrong fit (e.g. a scale-collapsed ICP alignment) is written
+    # to disk, entered into the corpus manifest, and reported as a success in
+    # `summary.txt` — the exact failure the review caught.
+    max_scale_deviation_factor: float = 3.0
+    # `CloudAlignment.scale` (ICP-refined, with_scaling=True) must stay within this
+    # multiplicative factor of the PCA ratio-of-extents estimate that seeds ICP.
+    # ICP can walk the scale to a collapsed/degenerate solution when the wrong
+    # rotation candidate wins the inlier-RMSE comparison; PCA's coarse estimate is
+    # an independent anchor. 3x gives real headroom above ICP's normal refinement
+    # of a PCA seed while still catching an order-of-magnitude collapse.
+    max_chamfer_asymmetry_ratio: float = 15.0
+    # `chamfer_mesh_to_cloud_mean_mm` must not exceed `chamfer_cloud_to_mesh_mean_mm`
+    # by more than this factor. A one-sided collapse (e.g. the mesh shrinks toward
+    # its centroid) makes cloud->mesh look deceptively good — a tiny mesh can still
+    # pass close to many cloud points by coincidence — while mesh->cloud explodes,
+    # since most of the mesh's own surface is then far from the cloud. A healthy
+    # fit's two directions differ by sampling-density noise only (typically < 3x);
+    # 15x is a large margin chosen to be robust to that noise while still catching
+    # a >~2500x asymmetry (the observed regression) many times over.
+    max_displacement_mean_mm: float = 20.0
+    # Mean |D| bound in millimetres. `D` is meant to absorb off-manifold surface /
+    # clothing detail only (REVIEW.md 7.6's own target: <= 5mm) — never alignment
+    # or shape slack. 20mm gives 4x headroom above that target (to tolerate a
+    # genuinely detailed real scan) while still catching a gross failure by an
+    # order of magnitude (the observed regression measured a 204mm mean).
+
     # --- Output ---
     subject_id: str = "subject"
     oracle_only: bool = False  # 7.B8

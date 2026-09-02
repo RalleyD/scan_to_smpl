@@ -9,7 +9,7 @@ import torch
 
 from scantosmpl.config import ModelPaths, Tier3Config
 from scantosmpl.fitting.optimiser import RefinementResult
-from scantosmpl.fitting.surface_pipeline import Tier3Pipeline
+from scantosmpl.fitting.surface_pipeline import Tier3Pipeline, Tier3SanityError
 from scantosmpl.smpl.model import SMPLModel
 
 
@@ -179,7 +179,14 @@ def fit_surface(
     )
 
     pipeline = Tier3Pipeline(smpl_model, cfg)
-    result = pipeline.run(tier2, pointcloud, pose_name=pose_name, output_dir=output)
+    try:
+        result = pipeline.run(tier2, pointcloud, pose_name=pose_name, output_dir=output)
+    except Tier3SanityError as exc:
+        # A write-time sanity gate rejected this fit — nothing was written (no
+        # artefact dir, no manifest entry). Surface it as a clean CLI failure
+        # rather than a raw traceback; the gate's own message names which check
+        # fired and the measured numbers behind it.
+        raise click.ClickException(f"Tier 3 sanity gate rejected this fit: {exc}") from exc
 
     click.echo(f"Tier 3 complete: {result.artefact_dir}")
     click.echo(

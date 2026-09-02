@@ -22,6 +22,7 @@ from typing import Protocol
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 from scantosmpl.pointcloud.io import PointCloud
 from scantosmpl.pointcloud.preprocess import bbox_diagonal
@@ -29,6 +30,66 @@ from scantosmpl.pointcloud.preprocess import bbox_diagonal
 logger = logging.getLogger(__name__)
 
 N_PROPER_ROTATIONS = 24
+
+#: Final polish: `icp_threshold_frac * mesh_bbox_diagonal` is intentionally loose
+#: during the 24-candidate search (candidates start far from the correct pose, so a
+#: tight threshold would find no correspondences at all in most of them) but that same
+#: looseness (~100+ mm on a real body) saturates `fitness` near 1.0 for every candidate
+#: and leaves ~2-3 cm of avoidable translation error on the winner. These fractions of
+#: the coarse threshold are applied, in order, as a cascade of RIGID (no re-estimated
+#: scale -- master D6, scale is solved once) point-to-plane polishes on the WINNING
+#: candidate only, tightening the correspondence radius each step to squeeze out that
+#: avoidable error.
+#:
+#: P1 fix (iteration 2): this cascade's ONLY job is producing the best TRANSFORM. It
+#: used to also gate itself on `cfg.icp_min_fitness` (stopping -- i.e. keeping a
+#: LOOSER, unpolished transform -- the moment a tighter stage's fitness dipped below
+#: the bar), which made `CloudAlignment.converged` tautological: whatever transform the
+#: cascade stopped on was, by construction, the one at or above `icp_min_fitness`, so
+#: `converged` could never actually distinguish a good alignment from a bad one, and
+#: tightening `icp_min_fitness` perversely made the loop stop EARLIER at a LOOSER
+#: threshold where `fitness` reads higher. The cascade below no longer looks at
+#: `cfg.icp_min_fitness` at all: it always tightens through every fraction, only
+#: stopping early if a stage finds literally zero correspondences (a genuinely
+#: degenerate radius, not a quality judgement -- see `_pick_nonzero_fitness`). The
+#: REPORTED `fitness`/`inlier_rmse_m`/`converged` are computed separately, in one
+#: `evaluate_registration` call at the fixed `_FINAL_MEASUREMENT_THRESHOLD_FRAC`,
+#: regardless of which cascade stage the winning transform came from -- see that
+#: constant's docstring for the calibration.
+_POLISH_THRESHOLD_FRACTIONS: tuple[float, ...] = (0.3, 0.1, 0.03)
+
+#: P1 fix (iteration 2): `CloudAlignment.fitness`/`inlier_rmse_m`/`converged` are
+#: measured at exactly ONE fixed correspondence radius -- `icp_threshold_frac *
+#: mesh_bbox_diagonal * _FINAL_MEASUREMENT_THRESHOLD_FRAC` -- independent of wherever
+#: the polish cascade above stopped. 0.12 was chosen by direct measurement on the
+#: master §7.3-style fixture (`_composite_body_mesh`, a ~2000-vertex-per-part
+#: asymmetric ellipsoid body, `icp_threshold_frac=0.05`): a genuinely well-aligned
+#: full-body surface sample reads `fitness ≈ 0.56-0.57` at this radius (comfortably
+#: above the default `icp_min_fitness=0.5`, with margin, and essentially independent of
+#: source cloud density -- 6k/20k/50k points all land within 0.56-0.58), while
+#: height-sliced partial-body clouds (head-only/legs-only/feet-only) read `fitness ≈
+#: 0.06-0.12` at the same radius -- a >4x gap. The tighter `_POLISH_THRESHOLD_FRACTIONS`
+#: level (0.03, ~2.5mm on this fixture) was tried first and rejected: even the
+#: genuinely well-aligned full-body case only reaches `fitness ≈ 0.06` there, because
+#: at that radius the measurement is dominated by the mesh's own vertex tessellation
+#: spacing and the source cloud's sampling density, not by alignment quality -- it
+#: would misreport a perfect fit as unconverged. 0.12 sits just above that floor
+#: (comparable to the ~8-10mm vertex spacing the real SMPL mesh's own topology is
+#: documented to have -- see `_raycasting_scene`'s docstring) while still being tight
+#: enough to separate a real fit from a partial/garbage one.
+_FINAL_MEASUREMENT_THRESHOLD_FRAC = 0.12
+
+#: P1 fix (iteration 2): companion bound to `icp_min_fitness` in `converged`'s
+#: computation -- catches the failure mode measured on the master §7.3 fixture's
+#: "feet-only" partial-cloud probe, where a low-extent cloud's OWN `fitness` (a
+#: SOURCE-point-centric measure: "what fraction of MY points found a correspondence")
+#: read misleadingly high (0.62-0.68) because every one of its few points sat near
+#: *something* on the mesh, while it actually covered under 3% of the mesh's own
+#: surface -- exactly the asymmetry `_target_coverage` exists to catch (see its
+#: docstring). Measured at `_FINAL_MEASUREMENT_THRESHOLD_FRAC`: a genuine full-body fit
+#: covers ~75-80% of the mesh's vertices; head-only/legs-only/feet-only partial slices
+#: cover 2-6%. 0.3 sits with wide margin on both sides of that gap.
+_MIN_TARGET_COVERAGE = 0.3
 
 
 class AlignConfigLike(Protocol):
@@ -41,6 +102,21 @@ class AlignConfigLike(Protocol):
     icp_max_iterations: int
     icp_threshold_frac: float
     icp_min_fitness: float
+    #: Candidate-selection guard (P0 fix, iteration 1): a scaled point-to-point
+    #: ICP stage (`with_scaling=True`) can walk a wrong-rotation candidate's
+    #: scale toward a collapsed/degenerate solution that still reports a
+    #: deceptively LOW inlier RMSE and fitness=1.0 (raw inlier RMSE is
+    #: scale-degenerate -- shrinking the cloud shrinks the RMSE). A candidate
+    #: whose recovered scale departs from the PCA ratio-of-extents estimate
+    #: (`scale_init`, itself measured within ~1% of ground truth on the master
+    #: §7.3 fixture) by more than this factor is rejected outright, before its
+    #: RMSE/coverage score is even allowed to win. The same field also backs
+    #: `Tier3Pipeline`'s downstream write-time gate 2 on the identical
+    #: quantity (`scantosmpl.fitting.surface_pipeline._check_scale_deviation`)
+    #: -- reading it through this Protocol, rather than a locally-duplicated
+    #: constant, keeps the two checks from silently drifting apart if this
+    #: value is ever overridden.
+    max_scale_deviation_factor: float
 
 
 @dataclass
@@ -51,12 +127,25 @@ class CloudAlignment:
         scale: Source units -> metres (metres per source unit).
         rotation: (3, 3) float64 proper rotation (det = +1), source -> SMPL/world.
         translation: (3,) float64 metres, in the SMPL/world frame.
-        inlier_rmse_m: Open3D ICP inlier RMSE, metres.
-        fitness: Open3D ICP fitness (fraction of source points with a
-            correspondence within the threshold), in [0, 1].
+        inlier_rmse_m: Open3D inlier RMSE, metres, measured at the fixed
+            ``_FINAL_MEASUREMENT_THRESHOLD_FRAC`` radius (P1 fix, iteration 2:
+            NOT the radius the polish cascade happened to stop at -- see that
+            constant's docstring).
+        fitness: Open3D fitness (fraction of source points with a
+            correspondence within the fixed measurement radius), in [0, 1].
         n_candidates: Number of enumerated rotations tried (24).
         candidate_index: Index of the winning candidate, in [0, 24).
-        converged: ``fitness >= cfg.icp_min_fitness``.
+        converged: ``fitness >= cfg.icp_min_fitness`` AND the winning
+            transform's target coverage (fraction of the MESH's own vertices
+            with a nearby aligned point -- see ``_target_coverage``) clears
+            ``_MIN_TARGET_COVERAGE``. The coverage term is a P1 fix (iteration
+            2): ``fitness`` alone is source-point-centric and reads
+            misleadingly high for a low-extent/partial cloud where every point
+            happens to sit near *something* on the mesh.
+        scale_init: The PCA ratio-of-extents scale estimate that seeded ICP
+            and gated candidate selection — exposed so a downstream consumer
+            (e.g. `Tier3Pipeline`'s write-time sanity gates) can compare
+            against it without recomputing `pca_triad` a second time.
     """
 
     scale: float
@@ -67,6 +156,7 @@ class CloudAlignment:
     n_candidates: int
     candidate_index: int
     converged: bool
+    scale_init: float
 
     def apply(self, points: np.ndarray) -> np.ndarray:
         """Map (N, 3) source-frame points into the SMPL/world frame (metres)."""
@@ -210,18 +300,68 @@ def _mesh_target(mesh_vertices: np.ndarray, mesh_faces: np.ndarray) -> o3d.geome
     return target
 
 
-def _better(
+def _pick_nonzero_fitness(
     a: o3d.pipelines.registration.RegistrationResult,
     b: o3d.pipelines.registration.RegistrationResult,
 ) -> o3d.pipelines.registration.RegistrationResult:
-    """Pick the better of two ICP results: lowest inlier RMSE among those with
-    a non-zero fitness (Open3D reports rmse = 0 when there are NO
-    correspondences at all, which would otherwise win every comparison)."""
-    if a.fitness <= 0.0:
-        return b
+    """Prefer ``b`` (the later refinement stage) unless it found NO correspondences at
+    all (Open3D reports ``inlier_rmse = 0`` with zero correspondences, which must not
+    be read as "perfect"). This does **not** compare RMSE across ``a``/``b`` (that
+    comparison is exactly the scale-degenerate mistake this module used to make --
+    see ``_MAX_SCALE_DEVIATION_FACTOR``'s docstring) -- it only guards a degenerate
+    empty-correspondence edge case."""
     if b.fitness <= 0.0:
         return a
-    return b if b.inlier_rmse < a.inlier_rmse else a
+    return b
+
+
+def _raycasting_scene(vertices: np.ndarray, faces: np.ndarray) -> o3d.t.geometry.RaycastingScene:
+    """A reusable BVH-accelerated scene for exact, unsigned point-to-**triangle**
+    distance queries (master D2) -- built once outside the 24-candidate loop.
+
+    Unlike a nearest-*vertex* distance, this is not limited by the SMPL mesh's own
+    ~8-10mm vertex spacing: a point sitting exactly between two vertices, on the
+    mesh's own surface, still reads ~0. That floor is precisely what let a
+    scale-collapsed candidate look deceptively good under the old vertex-based
+    ``inlier_rmse`` criterion.
+    """
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(
+        o3d.core.Tensor(np.ascontiguousarray(vertices, dtype=np.float32)),
+        o3d.core.Tensor(np.ascontiguousarray(faces, dtype=np.uint32)),
+    )
+    return scene
+
+
+def _cloud_to_mesh_rms(scene: o3d.t.geometry.RaycastingScene, points: np.ndarray) -> float:
+    """RMS unsigned point-to-triangle distance (metres) from ``points`` to the mesh
+    ``scene`` was built from. Not vertex-tessellation-limited -- see
+    :func:`_raycasting_scene`."""
+    if points.shape[0] == 0:
+        return float("inf")
+    query = o3d.core.Tensor(np.ascontiguousarray(points, dtype=np.float32))
+    distances = scene.compute_distance(query).numpy().astype(np.float64)
+    return float(np.sqrt(np.mean(np.square(distances))))
+
+
+def _target_coverage(
+    mesh_vertices: np.ndarray, aligned_points: np.ndarray, threshold: float
+) -> float:
+    """Fraction of the TARGET mesh's vertices that have an aligned SOURCE point within
+    ``threshold`` of them.
+
+    This is deliberately the reverse direction from Open3D's own ``fitness`` (which is
+    the fraction of SOURCE points with a correspondence -- a cloud collapsed into a
+    tiny region can score ``fitness = 1.0`` there, because every one of its points is
+    near *something*). A collapsed source cloud occupies almost none of a large target
+    mesh's volume, so it covers almost none of the *target*'s vertices -- this term
+    catches the P0 failure mode directly, independent of scale.
+    """
+    if aligned_points.shape[0] == 0:
+        return 0.0
+    tree = cKDTree(aligned_points)
+    nearest, _ = tree.query(mesh_vertices, k=1)
+    return float(np.mean(np.asarray(nearest) <= threshold))
 
 
 def align_cloud_to_smpl(
@@ -232,10 +372,23 @@ def align_cloud_to_smpl(
 ) -> tuple[PointCloud, CloudAlignment]:
     """Align a source-frame cloud onto the Tier 2 SMPL mesh.
 
-    Pipeline (master D9): PCA triads -> 24 candidate rotations -> per candidate
-    a scaled point-to-point ICP (which is what solves the unknown source-unit
-    scale) followed by a point-to-plane polish (rigid, so it preserves that
-    scale) -> keep the lowest inlier RMSE.
+    Pipeline (master D9): PCA triads -> 24 candidate rotations -> per candidate a
+    scaled point-to-point ICP (which is what solves the unknown source-unit scale)
+    followed by a point-to-plane polish (rigid, so it preserves that scale) -> keep
+    the best-scoring candidate -> a final rigid, shrinking-threshold polish on the
+    winner alone.
+
+    Candidate selection is **not** "lowest Open3D inlier RMSE" (that quantity is
+    scale-degenerate: shrinking a candidate's recovered scale toward zero shrinks its
+    own inlier RMSE too, so a collapsed candidate can and does win a raw-RMSE
+    comparison -- see ``cfg.max_scale_deviation_factor``). Instead, each candidate is
+    scored by, in priority order: (1) whether its recovered scale stays within
+    ``cfg.max_scale_deviation_factor``x of the PCA-derived ``scale_init`` (a collapsed
+    or exploded candidate is rejected outright); (2) ``_target_coverage`` -- what
+    fraction of the mesh's own vertices land near an aligned source point (a
+    collapsed candidate covers almost none of it); (3) ``_cloud_to_mesh_rms`` -- an
+    exact point-to-**triangle** RMS (master D2), so the winner is not penalised by the
+    SMPL mesh's own vertex tessellation the way a nearest-vertex measurement would be.
 
     Args:
         cloud: Cloud in its source frame, normally after `preprocess_cloud`.
@@ -250,8 +403,13 @@ def align_cloud_to_smpl(
         alignment: The recovered similarity and its ICP diagnostics.
 
     Raises:
-        ValueError: On an empty/degenerate cloud, a malformed mesh, or a cloud
-            that has already been aligned (``frame != "source"``).
+        ValueError: On an empty/degenerate cloud, a malformed mesh, a cloud
+            that has already been aligned (``frame != "source"``), or a cloud
+            so low-extent/degenerate that every one of the 24 candidate ICP
+            registrations produced a non-finite transform (P1 fix, iteration 2
+            -- measured on partial-body slices of the master §7.3 fixture;
+            this replaces what used to be a bare ``numpy.linalg.LinAlgError``
+            from feeding a NaN transform straight into ``_decompose_similarity``).
     """
     if cloud.frame != "source":
         raise ValueError(
@@ -278,6 +436,7 @@ def align_cloud_to_smpl(
 
     source = cloud.to_open3d()
     target = _mesh_target(verts, faces)
+    scene = _raycasting_scene(verts, faces)
     criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
         max_iteration=cfg.icp_max_iterations
     )
@@ -287,7 +446,12 @@ def align_cloud_to_smpl(
     point_to_plane = o3d.pipelines.registration.TransformationEstimationPointToPlane()
 
     rotations = enumerate_proper_rotations(src_axes, dst_axes)
-    best_result = None
+    scale_lower = scale_init / cfg.max_scale_deviation_factor
+    scale_upper = scale_init * cfg.max_scale_deviation_factor
+
+    best_key: tuple[bool, float, float] | None = None
+    best_result: o3d.pipelines.registration.RegistrationResult | None = None
+    best_transform: np.ndarray | None = None
     best_index = -1
 
     for index, rot in enumerate(rotations):
@@ -303,24 +467,126 @@ def align_cloud_to_smpl(
         res_plane = o3d.pipelines.registration.registration_icp(
             source, target, threshold, res.transformation, point_to_plane, criteria
         )
-        candidate = _better(res, res_plane)
+        candidate = _pick_nonzero_fitness(res, res_plane)
+        candidate_transform = np.asarray(candidate.transformation)
 
-        if best_result is None or _better(best_result, candidate) is candidate:
+        # P1 fix (iteration 2): a scaled point-to-point ICP stage on a low-extent
+        # (e.g. partial-body) source cloud can return an ALL-NaN transformation --
+        # measured on head-only/legs-only slices of the master §7.3 fixture, where
+        # this is Open3D's own SVD failing to converge internally. Decomposing a
+        # non-finite transform below would crash `_decompose_similarity`'s
+        # `np.linalg.svd` with a bare `LinAlgError` naming nothing about point
+        # clouds or alignment -- skip the candidate entirely instead, before it
+        # ever reaches scoring.
+        if not np.all(np.isfinite(candidate_transform)):
+            logger.warning(
+                "align_cloud_to_smpl: candidate %d/%d produced a non-finite ICP "
+                "transform (likely SVD non-convergence on a low-extent/degenerate "
+                "point set); skipping it.",
+                index,
+                len(rotations),
+            )
+            continue
+
+        scale_c, rot_c, trans_c = _decompose_similarity(candidate_transform)
+        valid_scale = scale_lower <= scale_c <= scale_upper
+
+        aligned_points = scale_c * (cloud.points @ rot_c.T) + trans_c
+        rms = _cloud_to_mesh_rms(scene, aligned_points)
+        coverage = _target_coverage(verts, aligned_points, threshold)
+
+        # Lexicographic: pass the scale gate first, then maximise target coverage,
+        # then minimise the (tessellation-floor-free) surface RMS.
+        key = (valid_scale, coverage, -rms)
+        if best_key is None or key > best_key:
+            best_key = key
             best_result = candidate
+            best_transform = candidate_transform
             best_index = index
 
-    assert best_result is not None  # 24 candidates are always enumerated
+    if best_result is None or best_transform is None:
+        # P1 fix (iteration 2): every one of the 24 candidates was non-finite --
+        # rather than propagating a bare LinAlgError (or an unguarded `assert`
+        # failure), name the cloud so the caller has something to act on.
+        raise ValueError(
+            f"align_cloud_to_smpl: all {len(rotations)} candidate ICP registrations "
+            f"produced a non-finite transform for a cloud with {cloud.n_points} points "
+            f"and bbox diagonal {bbox_diagonal(cloud.points):.6g} (source units). The "
+            "cloud is likely too small, too low-extent, or otherwise degenerate "
+            "(e.g. a partial-body scan) for ICP to register against the full SMPL "
+            "mesh -- provide a more complete point cloud."
+        )
+    assert best_key is not None
 
-    scale, rotation, translation = _decompose_similarity(np.asarray(best_result.transformation))
+    if not best_key[0]:
+        logger.warning(
+            "align_cloud_to_smpl: no candidate's recovered scale fell within "
+            "%.1fx of the PCA estimate scale_init=%.6g; using the best-scoring "
+            "candidate anyway (index=%d, scale=%.6g). Treat this alignment with "
+            "suspicion.",
+            cfg.max_scale_deviation_factor,
+            scale_init,
+            best_index,
+            _decompose_similarity(best_transform)[0],
+        )
+
+    # Final polish (winner only): the coarse `threshold` used for the 24-candidate
+    # search is loose by design (candidates start far from correct, so a tight
+    # threshold would find no correspondences in most of them); that same looseness
+    # leaves avoidable translation error on the table. Tighten in a shrinking-threshold
+    # cascade of RIGID (no re-estimated scale, master D6) polishes.
+    #
+    # P1 fix (iteration 2): this loop's ONLY job is producing the best TRANSFORM -- it
+    # no longer looks at `cfg.icp_min_fitness` (see `_POLISH_THRESHOLD_FRACTIONS`'s
+    # docstring for why that used to make `converged` tautological). It always
+    # tightens through every fraction; the only early-stop condition is a stage
+    # finding literally zero correspondences (a degenerate radius for this transform,
+    # not a quality judgement -- mirrors `_pick_nonzero_fitness`), in which case the
+    # previous, looser-but-still-valid `polished_transform` is kept.
+    polished_transform = best_transform
+    for frac in _POLISH_THRESHOLD_FRACTIONS:
+        attempt = o3d.pipelines.registration.registration_icp(
+            source, target, threshold * frac, polished_transform, point_to_plane, criteria
+        )
+        attempt_transform = np.asarray(attempt.transformation)
+        if attempt.fitness <= 0.0 or not np.all(np.isfinite(attempt_transform)):
+            break  # this radius found nothing (or produced garbage) -- stop tightening
+        polished_transform = attempt_transform
+
+    # P1 fix (iteration 2): `fitness`/`inlier_rmse_m`/`converged` are measured
+    # SEPARATELY from the cascade above, in one `evaluate_registration` call at the
+    # fixed `_FINAL_MEASUREMENT_THRESHOLD_FRAC` radius -- regardless of which cascade
+    # stage `polished_transform` ended up at. `evaluate_registration` only scores the
+    # given transform; it does not move it, so this cannot itself change the winning
+    # alignment.
+    final_threshold = threshold * _FINAL_MEASUREMENT_THRESHOLD_FRAC
+    final_eval = o3d.pipelines.registration.evaluate_registration(
+        source, target, final_threshold, polished_transform
+    )
+
+    scale, rotation, translation = _decompose_similarity(polished_transform)
+    final_aligned_points = scale * (cloud.points @ rotation.T) + translation
+
+    # P1 fix (iteration 2): `fitness` alone is source-point-centric (what fraction of
+    # MY points found a correspondence) and reads misleadingly high for a low-extent
+    # cloud where every point sits near *something* -- e.g. the measured "feet-only"
+    # partial-cloud probe: fitness 0.62-0.68 despite covering <3% of the mesh and a
+    # mean per-point mapping error over 1m. `_target_coverage` (mesh-vertex-centric)
+    # catches that asymmetry directly -- see `_MIN_TARGET_COVERAGE`'s docstring.
+    coverage = _target_coverage(verts, final_aligned_points, final_threshold)
+
     alignment = CloudAlignment(
         scale=scale,
         rotation=rotation,
         translation=translation,
-        inlier_rmse_m=float(best_result.inlier_rmse),
-        fitness=float(best_result.fitness),
+        inlier_rmse_m=float(final_eval.inlier_rmse),
+        fitness=float(final_eval.fitness),
         n_candidates=len(rotations),
         candidate_index=int(best_index),
-        converged=bool(best_result.fitness >= cfg.icp_min_fitness),
+        converged=bool(
+            final_eval.fitness >= cfg.icp_min_fitness and coverage >= _MIN_TARGET_COVERAGE
+        ),
+        scale_init=scale_init,
     )
 
     aligned = PointCloud(
@@ -334,12 +600,14 @@ def align_cloud_to_smpl(
     )
 
     logger.info(
-        "Aligned cloud: candidate %d/%d, scale=%.6g, fitness=%.3f, rmse=%.4f m, converged=%s",
+        "Aligned cloud: candidate %d/%d, scale=%.6g, fitness=%.3f, rmse=%.4f m, "
+        "coverage=%.3f, converged=%s",
         alignment.candidate_index,
         alignment.n_candidates,
         alignment.scale,
         alignment.fitness,
         alignment.inlier_rmse_m,
+        coverage,
         alignment.converged,
     )
     return aligned, alignment

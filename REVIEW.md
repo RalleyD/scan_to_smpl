@@ -253,13 +253,38 @@ Optionally compute SMPL+D per-vertex displacements.
 
 | # | Criterion | Verify |
 |---|-----------|--------|
-| 7.1 | **Chamfer distance (SMPL → PC) < 8mm** on clean scanner data | Measure |
+| 7.1 | **Chamfer distance < 8mm** on clean scanner data — per the metric definition below, both directions reported separately | Measure |
 | 7.2 | Surface refinement reduces chamfer by ≥40% vs Tier 2 alone | Compare |
 | 7.3 | Semantic weighting improves torso alignment vs uniform weighting | A/B |
 | 7.4 | β refinement improves body proportions (shoulder width, waist) vs Tier 2 | Measure |
 | 7.5 | θ remains plausible; no self-intersections added | Visual + count |
 | 7.6 | SMPL+D captures clothing detail within 5mm (if enabled) | Displacement stats |
 | 7.7 | Optimisation < 60 seconds on GPU with 50K point cloud | Timing |
+
+### 📏 Metric Definition — "Chamfer" (binding for 7.1, 7.2, and the Tier 3 gate)
+
+"Chamfer distance" is ambiguous, and the ambiguity is worth several mm here — more than
+half the 8mm budget. Fix it explicitly.
+
+**SMPL's mean edge length is ~1cm.** A cloud point lying mid-triangle is far from all three
+of that triangle's *vertices* even when the mesh surface passes exactly through it (worst case
+≈ `L/√3` ≈ 5.8mm at `L`=10mm). So a vertex-based cloud→mesh distance has a **floor set by
+tessellation, not by fit quality**. Measuring that way spends much of the 8mm budget before
+the optimiser does anything.
+
+| # | Requirement |
+|---|-------------|
+| 7.M1 | **Cloud → mesh direction MUST be point-to-*surface*** — distance to the nearest point on the nearest triangle, **not** to the nearest vertex. This is a requirement on the quantity, not on the library: any correct point-to-triangle implementation satisfies it. Record which was used in the artefact metadata. |
+| 7.M2 | **Mesh → cloud direction** may use vertex-to-nearest-point — dense Meshroom clouds make this direction effectively floor-free. |
+| 7.M3 | **Report both directions separately**, never only their mean or sum. A single fused number hides which side is failing, and one-directional chamfer is gameable by a mesh that collapses into the densest region of the cloud. |
+| 7.M4 | **State the aggregation and units** in the artefact: mean / median / RMS, and mm. RMS and mean differ substantially in the presence of outliers, which point clouds always have. |
+| 7.M5 | **Measure and report the tessellation floor** alongside the result: sample points uniformly on the SMPL surface, compute each one's distance to its nearest vertex, report mean and max. This is the irreducible offset for any vertex-based measurement and makes the headline number interpretable. |
+| 7.M6 | The **loss** used inside the optimiser need not equal the **metric** used for reporting. Vertex-to-point is a cheap, well-behaved loss; if faceting or shrink-wrapping appears, switch the loss to point-to-mesh. The reported metric is bound by 7.M1–7.M4 regardless. |
+
+> **Known confounds to state in the report, not silently absorb:** the 8mm figure is a composite
+> of fit error + Meshroom reconstruction noise (~±1–3mm) + tessellation floor + clothing/hair
+> present in the cloud but absent from SMPL. Only the first is what Phase 7 is optimising. If
+> the gate fails, decompose before re-tuning loss weights.
 
 ### ⚠️ TIER 3 GATE — Surface Accuracy
 
@@ -268,6 +293,31 @@ Optionally compute SMPL+D per-vertex displacements.
 | < 8mm | **PASS** |
 | 8-15mm | Check ICP alignment (Phase 6). Tune loss weights. |
 | > 15mm | Tier 2 SMPL too far off → revisit Phase 5 |
+
+### 🔗 Downstream Boundary Requirements — PSD / Tier 4
+
+Tier 3's SMPL+D output is the **ground-truth source** for Pose Space Deformation
+(`docs/psd_master_design_spec.md`). PSD is a strictly read-only consumer, so these are
+contract requirements on Phase 7, not suggestions. Each one, if violated, silently
+corrupts the PSD residual rather than failing loudly.
+
+| # | Requirement | Why PSD needs it |
+|---|-------------|------------------|
+| 7.B1 | **`--lock-betas` flag: β non-trainable, supplied from the reference-pose fit.** Must be the mode used for any multi-pose corpus run. | PSD's target is `δ = scan − SMPL(β,θ)`. If β differs per pose, δ absorbs *shape* differences as if they were *pose* deformation, and the interpolant blends body builds. See PSD spec R2. **Conflicts with AC 7.4 — see note below.** |
+| 7.B2 | **Persist `D` as a per-vertex (6890, 3) array per pose**, not just the final mesh. Mandatory, not "if enabled" (cf. 7.6). | `D` *is* the PSD learning signal. A baked mesh forces PSD to re-derive it and re-introduces frame ambiguity. |
+| 7.B3 | **Document and assert the frame `D` is expressed in** — posed/world (added after LBS) vs rest (added before LBS). Record it in the artefact metadata as an explicit field. | Determines whether PSD applies `R_v(θ)⁻¹` or nothing at all. Getting this wrong produces plausible-looking but wrong δ with no visible symptom (PSD spec R5). |
+| 7.B4 | **Topology invariance: 6890 verts / 13776 faces, original ordering, no remeshing or resampling.** Assert on write. | Blend-shape targets are index-aligned. Any reordering silently scrambles every target. |
+| 7.B5 | **Keep global scale + translation separable from `D`.** Do not bake a similarity transform into the displacement field. | A global transform folded into `D` appears to PSD as a pose-correlated deformation — it is not, and it will dominate the residual. |
+| 7.B6 | **Per-pose artefact layout + manifest** so a corpus builder can locate `(β, θ, D, quality)` by pose name. | `build_corpus()` reads these; it must assert shared β across samples. |
+| 7.B7 | **Persist per-pose fit quality** (chamfer, pa_mpjpe, median_reproj_px) alongside `D`. | Feeds optional confidence-weighted RBF rows (PSD spec open-Q4). |
+| 7.B8 | **Mark held-out poses as oracle-only in the manifest.** A pose fitted for evaluation must be flagged so it cannot enter PSD training. | Tier 3 on a held-out pose is a legitimate *ceiling* measurement, but if its output reaches training the point cloud is inside the loop and the split is void. |
+
+> **⚠️ Conflict to resolve: AC 7.4 vs 7.B1.** Criterion 7.4 ("β refinement improves body
+> proportions vs Tier 2") requires Tier 3 to *optimise* β. Requirement 7.B1 requires it to be
+> *frozen*. Both are legitimate for different runs. Resolution: treat β-refinement as a
+> **single-pose** capability (refine β once, on the reference pose, to get the best subject
+> shape), then **freeze that β** for every subsequent pose in the corpus. Phase 7 should
+> support both modes explicitly and the manifest should record which was used.
 
 ---
 

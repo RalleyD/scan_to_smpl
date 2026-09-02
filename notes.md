@@ -723,7 +723,384 @@ One caveat on the number, not the config: the 22.87mm came from the A/B harness,
 
 ---
 
+## PSD Implementation - Phase A
+
+The brief: Stage A builds a scattered-data interpolator over pose-space - this is NOT a body model.
+
+Prerequisites: Per-pose registered SMPL fit (all poses)
+
+It's job:
+
+   `pose_feature_x_i -> δ_i ∈ ℝ^(6890×3)`
+
+Where gamma lives in each vertex's rest-pose frame. All movement/deformation linear-blend skinning (LBS) explains contributes zero.
+
+The deliverable:
+
+- build a corpus of (x_i, gamma_i) with Beta asserted constant:
+  - per vertex RBF solve `w = (ΦᵀΦ)⁻¹Φᵀd`
+  - evaluate with a held-out pose
+  - bake into Maya deltas (displacement)
+  
+RBF is used because with N=7 poses, a neural-net has to validation split to spare and no exactness guarantee (but a likelihood of overfitting). RBG interpolates the training poses exactly and it's only hyperparameter (rho) is the falloff needed for an animator/blend-shape artist/character rigger.
+
+Caveat: both prediction an target live on the SMPL manifold, without independant geometric evaluation. So the verification here is self-consistency, not attributable to the real ground truth.
+
+Φ is not "a matrix of pose features." It's a matrix of similarities between pose features. Feature vectors go in; scalars come out.
+
+D is (5, 20670), not 6890×3. Five rows — one per training pose. And yes, its entries are δ.
+
+### The pipeline:
+
+```
+CAPTURE          5 poses of one subject, ~60 photos each
+   │
+   ▼
+TIER 1→2         per pose → (β, θᵢ) + fitted mesh
+   │
+   ▼
+β-LOCK REFIT     fit T-pose first, freeze its β, re-fit the other 4 with β
+   │             non-trainable.  ← WHY: β drift would let the model learn
+   │             "body build changes with pose", which is estimator noise.
+   ▼
+MESHROOM         photogrammetry → raw point cloud Cᵢ per pose
+   │             ← THE CRITICAL PATH. Without off-manifold geometry there
+   │               is no δ. You have this for T-pose only.
+   ▼
+TIER 3           fit SMPL+D to Cᵢ → per-vertex displacement Dᵢ
+   │             TRAINING POSES ONLY. Never the held-out pose.
+   ▼
+RESIDUAL         δ_world = scan_vertex − M_base_vertex
+   │             δ_local = R_v(θ)⁻¹ · δ_world        ← R5. Silent-failure zone.
+   ▼
+ENCODE           θᵢ → xᵢ    (R(θ)−I, flattened)
+   │
+   ▼
+BUILD Φ          Φᵢⱼ = φ(‖xᵢ−xⱼ‖)                    → (5,5)
+   │
+   ▼
+SOLVE            np.linalg.solve(Φ, D) → W           → (5,20670)
+   │             This is "training". It is one line.
+   ▼
+PREDICT          new pose θ*:
+   │               x*  = encode(θ*)
+   │               δ*  = Σⱼ Wⱼ · φ(‖x* − xⱼ‖)        ← in LOCAL frame
+   │               δ*_world = R_v(θ*) · δ*           ← rotate back OUT
+   │               mesh = SMPL(β, θ*) + δ*_world
+   ▼
+EVAL             Chamfer(mesh, C_heldout)
+   │             Tier 3 never ran on the held-out pose. No leak.
+   ▼
+EXPORT           Maya blend shapes: neutral mesh + per-pose delta targets
+```
+
+3. Why each piece is shaped that way
+Why local frame? In world coordinates, a forearm vertex swings through a huge arc when the elbow bends. That motion is 99% rigid articulation, which LBS already explains. Subtract the baseline and undo the rotation, and what's left is only the muscle bulge. That residual is small, smooth, and roughly the same at similar poses — so it interpolates. Raw world displacement would not.
+
+Why does δ go back out through R_v at predict time? Because you learned it in rest orientation, and Maya needs it in the posed mesh's frame. The forward and inverse rotations bracket the whole model. Get one wrong and the other still runs.
+
+Why RBF and not a net? Look at the shapes. Φ is 5×5. Your model has 5 degrees of freedom per output. A net would have thousands of parameters and 5 training examples, needing a validation split you don't have. RBF hits all 5 training poses exactly, closed form, one hyperparameter with physical meaning.
+
+Why does the encoding dimension matter if it doesn't change Φ's size? It enters only through ‖xᵢ − xⱼ‖. In high dimensions with few points, all pairwise distances converge to roughly the same value — so every φ entry becomes similar, Φ approaches all-ones, becomes near-singular, and the interpolant degenerates toward a constant. Keeping d low keeps the distances discriminative.
+
+4. What the outstanding questions are actually for
+Q-A: the test fixture
+The problem it solves: if R_v(θ)⁻¹ is wrong — transposed, wrong joint, wrong composition order — δ still comes out as 6890 plausible-looking small vectors. The RBF still fits. The export still loads in Maya. It just silently encodes the wrong deformation. Nothing downstream will ever tell you.
+
+answer WIP:
+
+   potentially the middle of the arm (look it up as instructed)
+   with rotation matrices, there is an angle where the Rt is the same (orthogonal, perpendicular, pi/2, pi?)
+
+anser B WIP:
+
+   tune alpha on the training set or fix a-priori as the mean nearest-neighbour distance between training poses.
+
+   to avoid LOVO as extrapolation, use one of the standard-reference poses for LOVO. 
+   keeping an extreme or unusual pose in the training set?
+
+So you need a case where you know the right answer before running the code.
+
+The δ=0 test can't do it (R⁻¹·0 = 0 for any R).
+Constructing the input with your own R_v can't do it (proves R·R⁻¹=I).
+So R_v must be hand-written, which needs a vertex where it's a single bone's rotation with no blending → look at lbs_weights.max(axis=1).
+And your test angle must not be one where R = Rᵀ, or a transpose bug passes.
+The two sub-questions: which vertices, and which angle.
+
+Q-B: σ, and the leakage you just walked into
+You said tune σ on LOPO. But if σ is chosen by minimising held-out error, and then you report that held-out error as your result, the number is optimistically biased — you fitted the test set with one parameter.
+
+At N=5 you can't afford a third split. So pick one:
+
+Fix σ a priori by rule (mean nearest-neighbour distance between training poses), report LOPO honestly. Recommended.
+Tune σ on LOPO and report it explicitly as a tuned number, not a clean generalisation estimate.
+Also unresolved from earlier: at N=5, some poses sit on the edge of the pose cloud. Holding one of those out tests extrapolation, which PSD isn't for. What do you do — and can you even tell which poses are interior with 5 points?
+
+5. What I still need from you
+The fixture (Q-A): which vertices, which angle, what the selectable inputs are.
+Your milestone sequence, re-ordered with the four gaps filled: β-lock refit, Meshroom (long-running, blocks nothing), the residual step, and the fixture that must precede it.
+Take the fixture first. It's the smallest one and it unblocks everything downstream.
+
+ whu C_heldout is not run through tier 3? If the held-out pose is not fitted to the ground truth, how do we know if the PSD gamma improved the chamfer during evaluation?
+Two separate things were bundled in what I said. Let me sharpen it.
+
+Why it can't be the target: Tier 3 is an optimiser fitted to C_7. Its output is nearly as close to C_7 as the machinery allows — by construction. If you compared PSD's prediction to that, you'd be comparing a prediction against an oracle that already saw the answer. And if that Tier-3 output ever fed training, C_7 is in the loop and the split is dead.
+
+Your question — how do we know δ helped? Not by comparing to Tier 3. By comparing to a baseline at the same pose. Both built from θ_7 alone:
+
+
+baseline :  SMPL(β, θ₇)                → Chamfer to C₇   = E_base
+PSD      :  SMPL(β, θ₇) + δ_pred       → Chamfer to C₇   = E_psd
+E_base − E_psd is the headline number. That's the whole claim: given only the pose, does the learned corrective get you closer to the real body than generic SMPL does? Neither mesh touched C_7.
+
+And Tier 3 on pose 7 is still worth running — as a ceiling, not a target. Fit it to C_7, get E_oracle. That tells you the best achievable on this data, so you can report:
+
+
+fraction of achievable gain captured  =  (E_base − E_psd) / (E_base − E_oracle)
+Which is far more honest than a raw millimetre number, because it separates "PSD is weak" from "the point cloud/topology can't do better anyway."
+
+So: run Tier 3 on the held-out pose, keep its output strictly out of training, and use it as the ceiling. That's the spec's "three-way comparison" done properly. I was too absolute earlier — you don't need it for the metric, but it makes the result interpretable.
+
+Now: the fixture. Which vertices, which angle.
+
+Answer A:
+
+   ```scripts/print_lbs_max_weights.py```
+
+   Top 10 vertices by max weight:
+  vertex    weight  joint#  joint_name
+    2725    1.0000      20  left_wrist
+    2722    1.0000      20  left_wrist
+    6194    1.0000      21  right_wrist
+    6183    1.0000      21  right_wrist
+    2720    1.0000      20  left_wrist
+    2727    0.9999      20  left_wrist
+    2721    0.9999      20  left_wrist
+    6204    0.9999      21  right_wrist
+    2723    0.9999      20  left_wrist
+    6184    0.9999      21  right_wrist
+
+   These are all left/right wrist vertices - hand vertices near the wrist are almost entirely rigid to the wrist joint.
+
+   The test fixture's rotation angle could be either theta=0 or theta=pi
+
+   a half-turn rotation turns every axis around. off diagonal elements (sin(x) =0) vanish making the matrix symmetric:
+
+   ```
+   R(pi) = ((-1,0), (0,-1)) = R(pi)^T
+   ```
+   in 3d space it also yields a symmetric rotation matrix.
+
+
+For a test fixture we're not worried about anatomy:
+
+   vertex 2725
+   joint left wrist
+
+   use 0 for R=I catching gross errors
+   use Pi/2 about a single axis as the canonical rotation choice.
+   this captures where R != R^t i.e the transpose should not produce identical output. Guards agains the issue where code that mistakenly uses R^t quietly produces identical output for the wrong input.
+   for pi/2, the difference is large and obvious.
+
+   displacement constant (multiplicative) -> use distinct unrelated components e.g (3,-7,11) = (Ux, Uy, Uz). A few mm should suffice so we can assert scale i.e not meters.
+
+   axis: z
+   use a coordinate axis so R stays hand-writable. In SMPL, set `theta[wrist] (0,0,pi/2)
+
+
+Answer B - milestone sequence (refine!):
+
+   Tier 3 refinement - package - ICP alignment, Kaolin chamfer, normal + Laplacian losses and body-part weighting -> capture per-vertex displacements (D).
+
+   **background task**: meshroom -> raw point clouds Ci for all poses.
+
+   capture all pose photography ->
+   tier1>2 (all poses) ->
+   Beta lock and refit all poses from locked t-pose base ->
+   from the fitted base poses, get per-vertex residuals: gamma_world = scan - m_base. Transform to local pose-space. ->
+   encode a vertex to each pose space ->
+   hold out pose (LOPO) non-extreme e.g A-pose ->
+   build phi matrix (5,5) on training poses ->
+   np.linalg.solve(phi, Displacements from tier 3) = W (bump height for kernel function) ->
+   predict on held-out pose: encode the new pose; solve local frame gamma; transpose to work frame; apply gamma_world to SMPL mesh ->
+   evaluate mesh to the heldout scan with Chamfer distance ->
+   optionally evaluate against the oracle held out tier 3 mesh to get percentage improvement ->
+   export maya blend shapes
+
+questions:
+
+help me figure out what injected displacement is appropriate to use, could any small value suffice? 
+same for which axis? 
+
+should we start with alpha fixed a-priori, then try tuning it on ~5 rounds of validation?
+
+held out-pose, this should be one that is not at the extremes - a standardised pose shape e.g. A-pose.
+
+---
+
+## Resolutions (continued from the questions above)
+
+### The fixture knobs — what each one is *for*
+
+`(vertex_index, joint_index, rotation_axis, rotation_angle, displacement u)`
+
+| Knob | Value | What it catches / why |
+|---|---|---|
+| `vertex_index` | 2725 (or any 1.0-weight vertex) | Needs `lbs_weights[v].max() ≈ 1.0` so `R_v` is **one bone's rotation, no blending** — which is what makes it hand-writable. |
+| `joint_index` | 20 (left_wrist) | Must be the joint that vertex is 100% weighted to. **Gotcha:** `R_v` is the joint's *global* rotation = composition of all ancestors. So pose ONLY this joint, leave every ancestor at rest → global == local → still hand-writable. |
+| `rotation_axis` | z (sweep x, y, z) | Coordinate axis keeps `R` trivially hand-writable. Sweeping all three catches **axis-indexing errors**. |
+| `rotation_angle` | π/2 — **never 0 or π** | At 0 and π, `R = Rᵀ`, so a transposed-matrix bug produces *identical output* and the test passes. π/2 makes `R ≠ Rᵀ` with an obvious difference. (0 is still worth keeping as a **second** case: `R=I` catches gross errors, just not transposes.) |
+| `u` | `(3, −7, 11)` mm | Must **break symmetries**. `(1,1,1)` hides axis swaps. `u` parallel to the rotation axis is useless (`R·u = u`). Distinct magnitudes + mixed signs + mm scale (doubles as a m-vs-mm units check). |
+
+(need to confirm understanding of displacement (u) values)
+
+Worked, for 90° about z: (need to confirm understanding here)
+
+```
+R = [ 0 −1  0 ]     u    = ( 1,  2,  3)
+    [ 1  0  0 ]     R·u  = (−2,  1,  3)   ← correct
+    [ 0  0  1 ]     Rᵀ·u = ( 2, −1,  3)   ← the bug. Two signs flip. Unmissable.
+```
+
+### Pose encoding, concretely (see chat session and clarify with your understanding)
+
+`θ` = 69 numbers = 23 joints × 3 (axis-angle: direction = axis, length = angle in radians).
+
+Per joint, three steps:
+
+```
+1. axis-angle (3,)  ──Rodrigues──►  rotation matrix (3,3)
+2. subtract identity:  R − I
+3. flatten to (9,)
+```
+
+Concatenate 23 joints → **x is (207,)**. One vector per pose.
+
+At rest, `θ_j = 0` → `R = I` → `R − I = 0`, so the rest pose encodes to **all zeros**. Good coordinate origin.
+
+Bend one joint 90° about z:
+```
+R − I = [ 0 −1  0 ]   [ 1 0 0 ]     [ −1 −1  0 ]
+        [ 1  0  0 ] − [ 0 1 0 ]  =  [  1 −1  0 ]  → (−1,−1,0, 1,−1,0, 0,0,0)
+        [ 0  0  1 ]   [ 0 0 1 ]     [  0  0  0 ]
+```
+
+Code: `scipy.spatial.transform.Rotation.from_rotvec(theta.reshape(23,3)).as_matrix()`, subtract `np.eye(3)`, reshape. Or `batch_rodrigues` in `external/smplx/smplx/lbs.py` — what SMPL uses for its own pose blendshapes.
+
+### Regioned pose encoding — why NOT all 207 dims
+
+Two independent reasons:
+
+1. **Statistical.** 5 basis functions spanning 207-D. Every query pose is far from all 5 training poses, so every `φ` value is small and roughly equal → the prediction collapses to a fixed weighted average, barely responsive to *which* pose was asked for. The slider does nothing.
+2. **Physical (stronger).** The encoding defines what "nearby pose" *means*. In 207-D that's "similar in all 23 joints at once." But a forearm vertex's soft-tissue bulge does not depend on the ankle angle — so including the ankle injects noise into the single number the interpolant depends on.
+
+**Resolution — per-region pose spaces** (paper §4.1, spec §4.3 "pose space dimension can vary per vertex"):
+
+```
+arm vertices    ← shoulder + elbow     (18-D)
+leg vertices    ← hip + knee           (18-D)
+torso vertices  ← spine joints         (27-D)
+```
+
+Each region gets its **own** Φ (still 5×5) from **its own** distances. Whole-body rig, every sub-problem low-dimensional. Cost: a handful of 5×5 solves + a region→joints map. Start with one region to prove the machinery, then fan out — same code, different joint subset.
+
+**Implementation note — the (207,) vector is never actually built.** It's just the concatenation of 23 per-joint (9,) blocks, so have the encoder return `(23, 9)` and slice:
+
+```python
+blocks = encode(theta)                            # (23, 9)
+x_arm  = blocks[[SHOULDER, ELBOW]].reshape(-1)    # (18,)
+x_leg  = blocks[[HIP, KNEE]].reshape(-1)          # (18,)
+```
+
+The flattened 207-D form is the all-joints special case, not a separate object.
+
+### Hold-out selection
+
+- ~~Rank by distance to the 207-D centroid.~~ **Superseded by regioned encoding: interiority is per-region.** A pose can be nicely interior for the arm region and an extreme outlier for the leg region; one global distance averages those together and hides it. Compute centroid distances **per region** and pick the pose that is acceptably interior across the regions you're actually claiming a result for.
+- **You still only get ONE hold-out pose.** You cannot hold out different poses per region: you evaluate one assembled mesh against one point cloud, so if the leg model trained on `C_heldout` while the arm model held it out, the whole-mesh chamfer is leaked for the leg. One pose, held out globally, applied to every region.
+- **Check the spread.** If the five centroid-distances (within a region) are all within a few % of each other, the ranking is arbitrary and the choice is a coin flip dressed as a criterion. Report the numbers. Expect this to happen — say so if it does.
+- HS / BTW are envelope-defining → keep in **training**. T-pose is the reference → always train. Leaves A-pose or shu.
+- **Hard limit to state in the report:** with N=5 and encoding dim > 4, *every* pose is on the convex hull. Five points span at most a 4-simplex. True interpolation testing needs N > d+1 and is **not achievable at N=5** — the spec's §7 split policy assumes otherwise. Nearest-centroid only *minimises* how far you extrapolate.
+
+### σ — three options, increasing rigour
+
+1. **Fixed a priori** = mean nearest-neighbour distance between training encodings. Report LOPO clean. **Start here.**
+   → **σ is per-region.** Mean NN distance in the 18-D arm space is a different number from the 27-D torso space. One global σ would be too wide for one and too narrow for the other. Same rule, applied per region.
+2. **Tuned, labelled as tuned** — fine if the report says "σ selected on this metric" and doesn't call it generalisation.
+3. **Nested CV** — outer holds out pose i, inner tunes σ by LOPO on the remaining 4. 5×4 = 20 solves of a 4×4. Milliseconds. Free at this scale.
+
+Regardless: an error estimate from 5 samples is noisy. Report spread, not just mean.
+
+### δ is additive; R_v is a change of basis — no conflict
+
+```
+vertex_posed = base_vertex + δ_world     ← ADDITION applies the correction
+δ_world      = R_v · δ_local             ← ROTATION changes which frame it's expressed in
+```
+
+"Step 3cm forward" is added to your position; the `(x,y,z)` representing "forward" depends which way you face. Turning changes components, not length. So Tier 3's world-frame `D` → target via `δ_local = R_v⁻¹ · D`.
+
+### Chamfer metric definition → REVIEW.md § 7.M1–7.M6
+
+SMPL edge length ~1cm. A cloud point mid-triangle is far from all three *vertices* even when the surface passes exactly through it (worst case ≈ `L/√3` ≈ 5.8mm at L=10mm). So **vertex-based cloud→mesh distance has a floor set by tessellation, not fit quality** — over half the 8mm budget.
+
+- Cloud→mesh **must** be point-to-**surface** (point-to-triangle). Requirement on the quantity, not the library.
+- Mesh→cloud may be vertex-to-point (dense clouds → effectively floor-free).
+- Report **both directions separately**; single-direction chamfer is gameable by a mesh collapsing into the dense region.
+- Loss ≠ metric is explicitly allowed.
+- **Measure your own tessellation floor**: sample points on the SMPL surface, distance to nearest vertex, mean + max.
+- 8mm is a composite: fit error + Meshroom noise (±1–3mm) + tessellation + clothing/hair. Decompose before re-tuning weights.
+
+### Tier 3 boundary requirements → REVIEW.md § 7.B1–7.B8
+
+Eight contract requirements on Phase 7 so its output is usable as PSD ground truth. The two that bite hardest:
+
+- **7.B1 β-lock** — and it **conflicts with AC 7.4** ("β refinement improves body proportions"), which requires Tier 3 to *optimise* β. Resolution recorded in REVIEW.md: refine β **once** on the reference pose, then **freeze** for every other pose; both modes supported, manifest records which.
+- **7.B3 `D` frame convention** — pre-LBS (rest) vs post-LBS (posed) must be documented and asserted. It's a one-line decision in Tier 3 that silently determines whether PSD applies `R_v⁻¹` or nothing, with no visible symptom if wrong.
+
+### Kaolin / torch version — defer the decision
+
+Kaolin's advantage is a *differentiable GPU* point-to-mesh loss. The **metric** doesn't need differentiability (Open3D `RaycastingScene.compute_distance` or `trimesh.proximity.closest_point`); the **loss** can start as `torch.cdist` vertex-to-point. So build Tier 3 without Kaolin, get a number, and only then decide if it earns a torch pin. If it does: prefer **downgrading the single env** over a split venv — the tiers share `scantosmpl` package code, and two envs means installing your own package twice forever.
+
+---
+
+## Outstanding tasks before implementation
+
+| # | Task | Why it's before code | Done looks like |
+|---|---|---|---|
+| 1 | **Confirm δ ≡ 0 empirically.** Load Tier 2 params → `SMPL(β,θ)` → align to the saved `.obj` (remove scale+translation) → report max & mean per-vertex deviation in mm. | Closes the spec defect with a number instead of an inference. Replaces §4.2's "geometrically thin". | A number in notes.md, and a spec edit to §4.2/R3/AC2/AC3. |
+| 2 | **Build the R5 fixture.** Both cases: `θ=0` (`R=I`, gross errors) and `θ=π/2` about z (transposes). Knobs parameterised per the table above. | The residual step fails *silently*. No real δ has a known correct value — only a constructed one does. Must precede the residual code it validates. | A test that fails when you deliberately transpose `R_v`. |
+| 3 | **Measure the tessellation floor** on your SMPL mesh. | Makes every chamfer number interpretable; tells you how much of the 8mm budget is unavailable. | mean + max mm, recorded. |
+| 4 | **Decide the region map** — which joints drive which vertices. | Determines encoding dim, hence whether interpolation is meaningful at N=5. Needs looking at what actually varies across T/A/shu/hs/btw. | A `region → joint indices` dict + the reasoning. |
+| 5 | **Compute the 5 pose encodings**, centroid distances, pick the hold-out, **report the spread**. | Turns hold-out choice from intuition into a measurement; the spread tells you whether the choice is meaningful at all. | 5 distances, chosen pose, spread stated. |
+| 6 | **Fix the σ policy** (start: a priori = mean NN distance). | Prevents the leakage of tuning-then-reporting on the same fold. | Written down before the first eval run. |
+| 7 | **Settle `D`'s frame convention with Tier 3** (7.B3) before Tier 3 is built. | Cheap now, expensive after hours of fitting produce data in the wrong frame. | Documented in the Tier 3 spec + asserted in the artefact. |
+| 8 | **Re-sequence the milestones** with Tier 3 broken into its real components, Meshroom as a parallel background job, and the fixture slotted before the residual step. | The current sequence hides an unbuilt package in one arrow and serialises a long job that blocks nothing. | Updated sequence in notes.md. |
+
+**Suggested order:** 1 → 2 → 3 (all independent, all small, all produce numbers) → 4 → 5 → 6 → 7 → 8. Kick Meshroom off in the background before any of them.
+
+
+---
+
+
+
 ## Glossary
+
+Term	Shape	What it is
+β	(10,)	Shape. Who the person is. Bone lengths, build. Constant across all poses. Locked.
+θ	(69,)	Pose. Joint angles, axis-angle. Varies per pose.
+LBS	—	Linear Blend Skinning. The rigid part of posing: each vertex is moved by a weighted blend of nearby bone transforms.
+lbs_weights	(6890, 24)	How much each vertex is influenced by each joint. Rows sum to 1.
+R_v(θ)	(3,3) per vertex	The rotation LBS applied to vertex v at pose θ — the blend of nearby bone rotations.
+M_base	(6890, 3)	SMPL(β, θ). What LBS + SMPL's own pose blendshapes predict. The baseline.
+δ_local	(6890, 3)	The learning target. What the real surface does that M_base failed to predict, expressed in each vertex's rest orientation.
+x	(d,)	Pose encoding. One vector per pose. R(θ)−I flattened. The interpolation coordinate.
+φ(r)	scalar	The bump. exp(−r²/2σ²). A falloff curve, not a distribution.
+σ	scalar	Bump width. The only hyperparameter. The animator's falloff knob.
+Φ	(5, 5)	Φᵢⱼ = φ(‖xᵢ−xⱼ‖). Pose-to-pose similarity.
+W	(5, 20670)	The model. Bump heights.
+N = 5	—	Training poses. Sets Φ's size. Sets the model's total capacity.
+d	—	Encoding dimension. Affects distances only. Never affects Φ's size.
 
 PA-MPJPE (Procrustes-Aligned Mean Per-Joint Position Error)
 

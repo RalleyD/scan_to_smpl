@@ -15,6 +15,65 @@ Design notes (master spec §2):
     one-sided loss shrink-wraps the mesh into the densest region of the cloud.
   * Robustness — cloud outliers are the norm in photogrammetry, so per-term
     residuals are Huber-bounded and then quantile-trimmed before averaging.
+  * **D12** — Tier 3 introduces no stochastic step. Vertex-normal accumulation
+    (`_vertex_normals`) therefore uses a cached sparse incidence matrix and
+    `torch.sparse.mm` rather than `index_add_`/`scatter_add_`, whose CUDA
+    `atomicAdd`-based accumulation order is documented-nondeterministic and
+    was measured to differ run-to-run at the 1e-7 (forward) / 1e-8 (gradient)
+    level — small per-call, but amplified to millimetres of displacement over
+    an Adam schedule.
+  * Normal-consistency trust-region weighting — each cloud point's `1 - |cos|`
+    term is weighted by its own (detached) distance to its nearest mesh
+    vertex, relative to `_NORMAL_TRUST_RADIUS_FRACTION` (1%) of the mesh's own
+    local edge length, fading linearly from full weight at distance 0 to zero
+    at the radius. CORRECTED (Review iteration 1, altitude finding): at 1% of
+    edge length this radius is far smaller than a Voronoi-cell half-width
+    (~50% of edge length), so it is **not** a scoped filter that gates out
+    only the narrow ambiguous band near the boundary between two vertices'
+    correspondence regions — a point a mere 0.7% of one edge length from its
+    nearest vertex (well inside that vertex's own neighbourhood, nowhere near
+    a boundary) already carries weight ~0.29, i.e. has already lost 71% of
+    its contribution. In practice this behaves much closer to a broad,
+    largely uniform attenuation of the whole term's gradient influence than a
+    surgical fix for the specific correspondence-flip effect (the discrete
+    nearest-vertex assignment recomputed every iteration flipping between two
+    near-equidistant vertices from one Adam step to the next) it was
+    originally designed to target. It is nonetheless a genuine, measured
+    improvement over the unweighted term (self-intersecting faces after the
+    shipped 250-iter
+    `w_normal=0.1` displacement stage on the AC12 regression scenario in
+    `tests/test_surface_fitting.py`: 117 -> 5893 unweighted vs. 117 -> ~1100
+    with this weighting, and the stage loss now *decreases* over the run
+    instead of rising monotonically) — but **it does not fully discharge
+    AC12's +5-face bound**. Sweeping the trust-radius fraction down to the
+    point of near-total gating still floors at roughly the same ~1000-face
+    figure, which means part of the divergence is not a correspondence-flip
+    effect at all: independent, confidently-assigned per-vertex normal pulls
+    with no smoothness coupling between them are enough on their own to
+    wrinkle the mesh under a quarter-thousand Adam steps. Reported upstream
+    (see this component's BUILD_RESULT notes) rather than tuned further
+    in-module, since a full fix likely needs a master §5.3 value change
+    (`DEFAULT_SURFACE_STAGES` is owned by `scantosmpl/fitting/surface.py`,
+    outside this module's boundary).
+  * Review iteration 2 — a genuinely different mechanism (per-FACE
+    correspondence: each cloud point assigned to its nearest face centroid,
+    each matched face's target normal the mean of its assigned points'
+    normals, loss weighted by that face's own detached area) was implemented
+    and MEASURED against the literal shipped `DEFAULT_SURFACE_STAGES`
+    (`w_normal=0.1`, 250 iterations) on the exact scenario this finding
+    reports (master synthetic fixture + a realistic perturbed Tier-2 input,
+    literal `Tier3Config()`): 149 -> 5348 self-intersecting faces — WORSE
+    than this (iteration 1) trust-region weighting's 149 -> 345, not better.
+    A smaller-cloud variant (`target_points=6000`) and a uniform-weight
+    (non-area) variant were also measured, at 149 -> 1913 and 149 -> 3393
+    respectively — both likewise worse than this module's shipped
+    trust-region weighting. Reverted; not shipped. Full numbers and the
+    diagnosed likely cause (area-weighting a face's contribution interacts
+    badly with mesh degeneracy: as chamfer-driven buckling shrinks a face's
+    area, its own corrective normal-consistency weight *shrinks with it*,
+    weakening exactly the correction that would resist further buckling —
+    a self-reinforcing loop candidate (b) in the iteration-2 review finding
+    did not anticipate) are in this component's BUILD_RESULT notes.
 """
 
 import hashlib
@@ -37,6 +96,21 @@ _EPS = 1e-12
 # Cache of built Laplacians — SMPL topology is fixed, so this is built once per
 # (face array, vertex count). Keyed by a hash of the face bytes.
 _LAPLACIAN_CACHE: dict[tuple[str, int], torch.Tensor] = {}
+
+# Cache of vertex<->face incidence matrices used by `_vertex_normals`. Keyed
+# by (face-hash, n_verts, device, dtype) — built once per topology/device/
+# dtype combination and reused (SMPL topology never changes within a run).
+_INCIDENCE_CACHE: dict[tuple[str, int, str, str], torch.Tensor] = {}
+
+# Fraction of the mesh's own (current) median incident-edge length used as
+# the normal-consistency trust-region radius: a cloud point closer to its
+# nearest vertex than this fraction gets full weight; beyond it, weight fades
+# linearly to zero at the full radius. Tied to the mesh's own resolution
+# (rather than a fixed metric constant) because SMPL's local vertex spacing
+# — and hence the distance at which a nearest-vertex assignment becomes
+# ambiguous between neighbours — varies severalfold across the body (dense at
+# hands/face, coarse at the torso).
+_NORMAL_TRUST_RADIUS_FRACTION = 0.01
 
 
 def _as_points(x: torch.Tensor, name: str) -> torch.Tensor:
@@ -172,6 +246,56 @@ def chamfer_loss(
     return loss, diagnostics
 
 
+def _face_vertex_incidence(
+    faces_long: torch.Tensor, n_verts: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """Sparse (V, F) incidence matrix; `M[v, f] = 1` iff face `f` touches vertex `v`.
+
+    Cached per (face topology, vertex count, device, dtype) — SMPL topology is
+    fixed within a run. `M @ face_normals` sums, for every vertex, the normals
+    of the faces around it — the same quantity `index_add_` over the three
+    per-face corners produced, but via a deterministic `torch.sparse.mm`
+    rather than an `atomicAdd`-based scatter (master D12; see module
+    docstring).
+    """
+    device = faces_long.device
+    key = (
+        hashlib.sha1(
+            np.ascontiguousarray(faces_long.detach().cpu().numpy(), dtype=np.int64).tobytes()
+        ).hexdigest(),
+        n_verts,
+        str(device),
+        str(dtype),
+    )
+    cached = _INCIDENCE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    n_faces = faces_long.shape[0]
+    face_ids = torch.arange(n_faces, device=device).repeat(3)
+    vert_ids = torch.cat([faces_long[:, 0], faces_long[:, 1], faces_long[:, 2]])
+    indices = torch.stack([vert_ids, face_ids])
+    values = torch.ones(vert_ids.shape[0], device=device, dtype=dtype)
+    incidence = torch.sparse_coo_tensor(
+        indices, values, size=(n_verts, n_faces), dtype=dtype, device=device
+    ).coalesce()
+
+    _INCIDENCE_CACHE[key] = incidence
+    return incidence
+
+
+def _face_corners(
+    vertices: torch.Tensor, faces_long: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather each face's three corner vertices: `(v0, v1, v2)`, each `(F, 3)`.
+
+    Shared by `_vertex_normals` and `_median_incident_edge_length`, which
+    otherwise each re-derive the identical per-face gather from `vertices`
+    and `faces_long`.
+    """
+    return vertices[faces_long[:, 0]], vertices[faces_long[:, 1]], vertices[faces_long[:, 2]]
+
+
 def _vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
     """Area-weighted vertex normals, (V, 3) unit length, same frame as vertices.
 
@@ -179,18 +303,30 @@ def _vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor
     gradient.
     """
     faces_long = faces.to(device=vertices.device, dtype=torch.long)
-    v0 = vertices[faces_long[:, 0]]
-    v1 = vertices[faces_long[:, 1]]
-    v2 = vertices[faces_long[:, 2]]
+    v0, v1, v2 = _face_corners(vertices, faces_long)
     # Cross-product magnitude is twice the triangle area, so accumulating the
     # un-normalised face normal weights each face by its area.
     face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)  # (F, 3)
 
-    normals = torch.zeros_like(vertices)
-    for k in range(3):
-        normals = normals.index_add(0, faces_long[:, k], face_normals)
+    incidence = _face_vertex_incidence(faces_long, vertices.shape[0], vertices.dtype)
+    normals = torch.sparse.mm(incidence, face_normals)
     # `.norm(...)` is untyped (Any) in the torch stubs; the result is always a Tensor.
     return cast(torch.Tensor, normals / normals.norm(dim=1, keepdim=True).clamp(min=_EPS))
+
+
+def _median_incident_edge_length(vertices: torch.Tensor, faces_long: torch.Tensor) -> torch.Tensor:
+    """Scalar (detached) median triangle-edge length of the current mesh.
+
+    Cheap (`O(F)`, shares `_face_corners`'s gather with `_vertex_normals`) and
+    recomputed per call rather than cached, since it must track the *current*
+    vertex positions — though in practice Tier 3's displacements are
+    metres-small perturbations of a fixed-topology mesh, so this barely moves
+    across an optimisation run.
+    """
+    with torch.no_grad():
+        v0, v1, v2 = _face_corners(vertices, faces_long)
+        edges = torch.cat([v1 - v0, v2 - v1, v0 - v2], dim=0)
+        return cast(torch.Tensor, edges.norm(dim=1).median())
 
 
 def normal_consistency_loss(
@@ -208,6 +344,21 @@ def normal_consistency_loss(
     of the surface), so a signed term would fight the fit rather than regularise
     it. Only the surface *orientation*, not its sign, is constrained.
 
+    Each point's term is additionally weighted by its own (detached) distance
+    to its nearest mesh vertex, relative to a **trust radius** of
+    `_NORMAL_TRUST_RADIUS_FRACTION` times the mesh's current median edge
+    length: full weight inside the radius, fading linearly to zero at it. At
+    the shipped 1% fraction this radius is much smaller than a Voronoi-cell
+    half-width, so — despite the name — this behaves more like a broad
+    attenuation of the whole term than a filter scoped to the narrow
+    ambiguous band where nearest-vertex correspondence flips between two
+    near-equidistant vertices from one Adam step to the next (see module
+    docstring for the measured numbers). It substantially improves — but, at
+    the shipped `w_normal=0.1` / 250-iteration schedule, does not fully
+    eliminate — a divergence under sustained Adam optimisation; see this
+    component's BUILD_RESULT notes for why a full fix is judged to be out of
+    this module's boundary.
+
     Args:
         vertices: (V, 3) or (1, V, 3) SMPL/world posed vertices, metres.
         faces: (F, 3) integer face indices (SMPL template ordering).
@@ -217,7 +368,7 @@ def normal_consistency_loss(
 
     Returns:
         Scalar tensor in [0, 1]; 0 when every cloud normal is parallel
-        (up to sign) to its nearest vertex normal.
+        (up to sign) to its nearest vertex normal (or every weight is zero).
     """
     verts = _as_points(vertices, "vertices")
     pts = _as_points(cloud, "cloud").to(device=verts.device, dtype=verts.dtype)
@@ -227,23 +378,33 @@ def normal_consistency_loss(
             f"cloud_normals shape {tuple(nrm.shape)} != cloud shape {tuple(pts.shape)}"
         )
 
-    vert_normals = _vertex_normals(verts, faces)  # (V, 3)
+    faces_long = faces.to(device=verts.device, dtype=torch.long)
+    vert_normals = _vertex_normals(verts, faces_long)  # (V, 3); already the right dtype/device
     nrm = nrm / nrm.norm(dim=1, keepdim=True).clamp(min=_EPS)
 
-    total = verts.new_zeros(())
-    n_terms = 0
+    with torch.no_grad():
+        trust_radius = _NORMAL_TRUST_RADIUS_FRACTION * _median_incident_edge_length(
+            verts, faces_long
+        )
+        trust_radius = trust_radius.clamp(min=_EPS)
+
+    weighted_total = verts.new_zeros(())
+    weight_total = verts.new_zeros(())
     for start in range(0, pts.shape[0], chunk_size):
         chunk = pts[start : start + chunk_size]
         with torch.no_grad():
-            # Correspondence is a discrete choice — no gradient through argmin.
-            nearest = torch.cdist(chunk, verts).argmin(dim=1)  # (C,)
+            # Correspondence (and the residual used to weight it) is a
+            # discrete choice — no gradient flows through either.
+            dist_to_mesh = torch.cdist(chunk, verts)
+            nearest_dist, nearest = dist_to_mesh.min(dim=1)  # (C,), (C,)
+            weight = (1.0 - nearest_dist / trust_radius).clamp(min=0.0, max=1.0)
         cos = (vert_normals[nearest] * nrm[start : start + chunk.shape[0]]).sum(dim=1)
-        total = total + (1.0 - cos.abs()).sum()
-        n_terms += chunk.shape[0]
+        weighted_total = weighted_total + (weight * (1.0 - cos.abs())).sum()
+        weight_total = weight_total + weight.sum()
 
-    if n_terms == 0:
+    if float(weight_total) <= _EPS:
         return verts.new_zeros(())
-    return total / n_terms
+    return weighted_total / weight_total
 
 
 def build_uniform_laplacian(faces: np.ndarray, n_verts: int) -> torch.Tensor:
