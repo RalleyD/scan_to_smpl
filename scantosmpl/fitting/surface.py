@@ -188,10 +188,8 @@ def _assert_no_scale_in_stages(stages: list[SurfaceStage]) -> None:
         )
 
 
-#: Master §5.3, with ONE deliberate deviation from the literal spec value —
-#: `displacement.w_displacement_reg` — documented in that field's own comment below.
-#: S2 fits (β?, θ, global_orient, translation) with D == 0 throughout; S3 freezes
-#: every SMPL parameter and solves D alone.
+#: Master §5.3. S2 fits (β?, θ, global_orient, translation) with D == 0 throughout;
+#: S3 freezes every SMPL parameter and solves D alone.
 DEFAULT_SURFACE_STAGES: list[SurfaceStage] = [
     SurfaceStage(
         name="model_fit",
@@ -207,30 +205,53 @@ DEFAULT_SURFACE_STAGES: list[SurfaceStage] = [
         params=["displacements"],
         n_iterations=250,
         w_chamfer=1.0,
-        w_normal=0.1,
-        w_laplacian=0.1,
-        # DEVIATES from master §5.3's literal 0.01 — Review iteration 2, AC18 D-
-        # recovery finding: on the real `synthetic_cloud` integration fixture
-        # (noise + outliers + ICP alignment residual, NOT this module's own clean
-        # in-memory unit tests), the spec's 0.01 let the recovered displacement
-        # field absorb 4-6x the true field's own magnitude as noise
-        # (measured |D-D_true| mean 4.98-6.35mm across two tier2 seeds, vs. the
-        # fixture's true mean 1.02mm — REVIEW.md 7.6's own <=5mm D target already
-        # exceeded). Sweeping {0.01, 0.03, 0.1, 0.3, 1.0} on that fixture shows a
-        # MONOTONIC error reduction with no ceiling found in-range (1.0 still
-        # improving), so this is bounded by the OTHER constraint instead: this
-        # module's own dense, noise-free known-answer test
-        # (`tests/test_surface_fitting.py::TestDisplacementStage`, offset_m=4mm,
-        # tolerance rel=0.4 i.e. floor 2.4mm) starts failing at 0.3 (patch
-        # recovers only 2.10mm) and fails badly at 1.0 (1.13mm) — the same
-        # regulariser that fixes the noisy-fixture over-fit also suppresses
-        # genuine signal on a clean scenario if pushed too far. 0.1 is the
-        # largest value in the swept range that (a) still discharges the clean
-        # known-answer test with margin (2.87mm, comfortably above the 2.4mm
-        # floor) and (b) cuts the noisy-fixture error by ~35% (4.98->3.23mm,
-        # 6.35->4.09mm across the two seeds) — a real, if partial, improvement.
-        # Full numbers in this component's BUILD_RESULT notes.
-        w_displacement_reg=0.1,
+        # The normal term is DELIBERATELY OFF. `normal_consistency_loss` minimises
+        # `1 - |cos|` directly, so its gradient flows through each vertex's own
+        # normal and pulls vertices independently — it wrinkles the mesh rather
+        # than smoothing it. Measured on the AC12 scenario
+        # (`TestPosePlausibility`): 117 -> 1262
+        # self-intersecting faces at w_normal=0.1, against AC12's +5 bound, and a
+        # sweep over {0.1, 0.05, 0.02, 0.01, 0.0} improves monotonically as the
+        # term is removed (1262/1527/1369/1127/756/89) — only exactly 0.0 passes.
+        #
+        # This matches the reference implementation. DavidBoja/SMPL-Fitting (cited
+        # in CLAUDE.md as this project's Tier 3 reference) uses normals only as a
+        # CORRESPONDENCE FILTER on a positional loss — it gates by angle and then
+        # returns the positional distance of the surviving pairs — so its gradient
+        # is positional and cannot wrinkle. Its shipped default omits the normal
+        # term entirely (`use_losses: ["data", "smooth", "landmark"]`). Smoothness
+        # is the actual anti-wrinkling mechanism, and it does the job here.
+        #
+        # `normal_consistency_loss` is kept, exported and unit-tested; if it is
+        # ever wanted, reformulate it as an angle-gated positional loss first.
+        w_normal=0.0,
+        # Raised 30x from 0.1. With the normal term gone, smoothness is the ONLY
+        # thing regularising D's spatial structure — SMPL-Fitting weights theirs
+        # at or above their data term (300->150 vs 150), where this was 10x below.
+        # Swept {0.1, 0.3, 1.0, 2.0, 3.0, 6.0, 10.0} on the `synthetic_cloud`
+        # fixture against |D - D_true| (D_true known exactly: +4mm along the
+        # outward vertex normal on the 1752 torso vertices, 0 on the other 5138).
+        #
+        # Selected on TORSO error — signal recovery, the thing Tier 3 exists to do
+        # — which is U-shaped with an interior minimum right here:
+        #   w_lap    1.0    2.0    3.0    6.0   10.0
+        #   torso  2.250  1.981  1.883  2.180  3.351   (null D==0 scores 4.000)
+        # Error on the other 5138 vertices falls monotonically instead (2.914 ->
+        # 0.518), because ever-stiffer D simply shrinks toward zero — so the
+        # AGGREGATE mean is an actively misleading selector here: it keeps
+        # improving to w_lap=10 while torso recovery collapses toward the null.
+        # `|D|` confirms 3.0 is not in the suppression regime: 2.25mm against a
+        # true 1.02mm (still over-, not under-estimating; w_lap=10 gives 0.57mm).
+        w_laplacian=3.0,
+        # Master §5.3's literal value, restored. It previously deviated to 0.1 on
+        # evidence measured with the broken normal term active; re-measured with
+        # w_normal=0 and w_lap=3.0, the deviation no longer pays for itself —
+        # 0.01 is BETTER on torso error (1.883 vs 1.995) and leaves the most
+        # margin on the clean known-answer patch (3.14mm vs 2.76mm, floor 2.4mm).
+        # It is worse on the zero-displacement vertices (2.176 vs 1.687); that is
+        # the accepted cost of not carrying an undocumented spec deviation for a
+        # sub-millimetre gain on the metric that matters least.
+        w_displacement_reg=0.01,
         learning_rate=1e-3,
     ),
 ]

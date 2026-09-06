@@ -356,11 +356,20 @@ class TestNormalConsistencyLoss:
 
 
 class TestNormalConsistencyTrustRegion:
-    """AC12/AC18 fix: correspondences far from any vertex (relative to the
-    mesh's own edge length) go inert rather than contributing full weight —
-    that boundary band is exactly where nearest-vertex correspondence flips
-    between neighbours from one optimisation step to the next, which is what
-    made the unweighted term diverge under Adam (see module docstring)."""
+    """Trust-region weighting inside `normal_consistency_loss`: correspondences
+    far from any vertex (relative to the mesh's own edge length) go inert rather
+    than contributing full weight — that boundary band is where nearest-vertex
+    correspondence flips between neighbours from one step to the next.
+
+    SCOPE: this covers an UNSHIPPED function. The trust region was an attempted
+    fix for the term's divergence and it was not sufficient — `DEFAULT_SURFACE_STAGES`
+    now ships `w_normal=0.0`, because the term minimises `1-|cos|` directly and so
+    pulls each vertex through its own normal, wrinkling the mesh (117 -> 1262
+    self-intersections; only exactly 0.0 clears AC12's bound). These tests are kept
+    to hold the function's documented contract for anyone who re-enables it — they
+    are NOT evidence about the shipped fit. If it is ever wanted, reformulate it as
+    an angle-gated positional loss the way DavidBoja/SMPL-Fitting does, rather than
+    tuning this radius."""
 
     def test_far_correspondence_is_inert(self):
         """A point equidistant between two vertices (well outside the trust
@@ -526,7 +535,14 @@ class TestDeterminism:
             normal = normal_consistency_loss(verts, faces_t, cloud, cloud_normals)
             lap = laplacian_smoothing_loss(model.displacements, laplacian)
             reg = displacement_regularisation(model.displacements)
-            # Mirrors (does not import) DEFAULT_SURFACE_STAGES' shipped S3 weights.
+            # Deliberately exercises ALL FOUR terms, including `normal` — which
+            # the shipped S3 schedule sets to w_normal=0.0 and so never evaluates.
+            # This is a DETERMINISM test, not a config mirror: `_vertex_normals`'s
+            # per-vertex accumulation is the one place a CUDA `atomicAdd` could
+            # reintroduce run-to-run variation (it is why that path uses a cached
+            # sparse COO matmul, master D12), so dropping the term here would
+            # delete the coverage this test exists to provide. The coefficients
+            # are arbitrary non-zero weights, NOT the shipped ones.
             loss = chamfer + 0.1 * normal + 0.1 * lap + 0.01 * reg
             loss.backward()
             optimiser.step()

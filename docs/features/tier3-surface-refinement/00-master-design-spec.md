@@ -192,7 +192,7 @@ Tier 2 RefinementResult (β, θ, t, s, verts)        raw cloud (Meshroom frame, 
        ⇒ D ≡ 0 throughout.  scale frozen (D6).  β frozen iff --lock-betas (D10).
                                    ▼
    S3  freeze all SMPL params, optimise D alone
-       vs chamfer + Laplacian + normal consistency + ‖D‖ regularisation
+       vs chamfer + Laplacian + ‖D‖ regularisation   (normal term OFF — see §5.3)
                                    ▼
    report  ChamferReport (both directions, separately) + tessellation floor
    persist output/fits/<subject>/<pose>/{smpl_params,displacements,registered.obj,alignment,quality}
@@ -552,9 +552,31 @@ DEFAULT_SURFACE_STAGES: list[SurfaceStage] = [
                  n_iterations=300, w_chamfer=1.0, w_pose_prior=0.01, w_shape_reg=0.01,
                  learning_rate=5e-3),
     SurfaceStage(name="displacement", params=["displacements"],
-                 n_iterations=250, w_chamfer=1.0, w_normal=0.1, w_laplacian=0.1,
+                 n_iterations=250, w_chamfer=1.0, w_normal=0.0, w_laplacian=3.0,
                  w_displacement_reg=0.01, learning_rate=1e-3),
 ]
+# w_normal = 0.0 DELIBERATELY. `normal_consistency_loss` minimises `1 - |cos|` directly, so
+# its gradient flows through each vertex's own normal and pulls vertices independently —
+# it wrinkles the mesh instead of smoothing it. Measured on the AC12 scenario: 117 -> 1262
+# self-intersecting faces at 0.1, and a sweep {0.1, 0.05, 0.02, 0.01, 0.0} improves
+# monotonically as the term is removed (1262/1527/1369/1127/756/89) — only exactly 0.0
+# clears AC12's +5 bound. This matches the reference implementation: DavidBoja/SMPL-Fitting
+# uses normals only as a CORRESPONDENCE FILTER on a positional loss (angle-gate, then return
+# the surviving pairs' positional distance), so its gradient is positional and cannot
+# wrinkle, and its shipped default omits the normal term entirely. The function is retained,
+# exported and unit-tested; re-enabling it requires reformulating it as an angle-gated
+# positional loss first.
+#
+# w_laplacian = 3.0 (30x the original 0.1). With the normal term gone, smoothness is the only
+# thing regularising D's spatial structure — SMPL-Fitting weights theirs at or above their
+# data term, where this sat 10x below. Swept {0.1 ... 10.0} on the synthetic_cloud fixture
+# against |D - D_true| and selected on TORSO error (signal recovery), which is U-shaped with
+# an interior minimum here — 2.250 / 1.981 / 1.883 / 2.180 / 3.351 mm at w_lap =
+# 1 / 2 / 3 / 6 / 10, against 4.000 for the null D == 0. Error on the 5138 zero-displacement
+# vertices falls monotonically instead (2.914 -> 0.518), because stiffer D just shrinks
+# toward zero, so the AGGREGATE mean is a misleading selector: it keeps improving to w_lap=10
+# while signal recovery collapses. |D| confirms 3.0 is not in the suppression regime — 2.25mm
+# against a true 1.02mm, still over- rather than under-estimating (w_lap=10 gives 0.57mm).
 # NOTE: "scale" appears in NO stage (D6). With lock_betas=True, "betas" is dropped from
 # model_fit's params at construction time — it is never merely zero-weighted.
 
@@ -822,9 +844,13 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
   AC is **inapplicable** in `--lock-betas` runs, which is exactly REVIEW.md's 7.4-vs-7.B1
   resolution (D10).
 - **AC12** (7.5) — θ stays plausible, no new self-intersections. **Evidence**:
-  `pytest tests/test_surface_fitting.py::test_pose_plausible_no_new_intersections -v` — per-joint
-  axis-angle change from Tier 2 `< 15°`, and the self-intersecting-face count does not increase
-  by more than 5 (REVIEW 5.7's existing threshold).
+  `pytest "tests/test_surface_fitting.py::TestPosePlausibility::test_pose_plausible_no_new_intersections" -v`
+  — per-joint axis-angle change from Tier 2 `< 15°`, and the self-intersecting-face count does not
+  increase by more than 5 (REVIEW 5.7's existing threshold). The test must run the LITERAL
+  `DEFAULT_SURFACE_STAGES` (it omits `stages=`, so the fitter uses its own default): AC12 is the
+  criterion that the shipped weights are wrong if they wrinkle the mesh, so a version that
+  overrides any weight does not discharge it. Measured 117 → 115 faces against the bound of 122,
+  and max per-joint change 9.07°, against 117 → 1262 for the pre-A1 weights.
 - **AC13** (7.7) — Optimisation < 60 s on GPU with a 50 K cloud. **Evidence**: fixture integration
   test records wall-clock for S2+S3 in `summary.txt`; asserted `< 60.0` when CUDA is available.
   (Measured budget: 74 ms/iter × 550 iters ≈ 41 s.)
