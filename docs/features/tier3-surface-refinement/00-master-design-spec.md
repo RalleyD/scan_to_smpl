@@ -802,8 +802,9 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
   `python -c "import dataclasses as d; from scantosmpl.evaluation.surface_metrics import ChamferReport; print([f.name for f in d.fields(ChamferReport)])"` contains `cloud_to_mesh_mm` and
   `mesh_to_cloud_mm` and **no** field whose name contains `chamfer_mm`, `combined`, `total` or `mean_both`.
 - **AC3** (7.M4) — Aggregation + units are explicit. **Evidence**: `quality.json` carries
-  `mean`/`median`/`rms` keys for both directions and every key name ends in `_mm`;
-  `ChamferReport.units == "mm"`.
+  `mean`/`median`/`rms` keys for both directions, and every **chamfer and tessellation-floor** key
+  name ends in `_mm`; `ChamferReport.units == "mm"`. (Scoped deliberately — `quality.json` also
+  carries counts, fractions and flags, which must not be given a `_mm` suffix.)
 - **AC4** (7.M5) — Tessellation floor is measured and reported. **Evidence**: `quality.json` has
   `tessellation_floor_mean_mm` and `tessellation_floor_max_mm`;
   `pytest tests/test_surface_metrics.py::test_tessellation_floor_bound -v` asserts
@@ -812,15 +813,26 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
 
 ### Alignment (Phase 6 / 6.3–6.5)
 
-- **AC5** — ICP recovers a known similarity. **Evidence**:
-  `pytest tests/integration/test_tier3_integration.py::test_alignment_recovers_ground_truth -v` —
-  on the synthetic fixture, `|scale/scale_true − 1| < 0.01`, rotation geodesic error `< 1.0°`,
-  translation error `< 5 mm`, `alignment.converged is True`.
+- **AC5** — ICP recovers a known similarity, measured as **composite pointwise error**:
+  mean `‖T_recovered(p) − T_true(p)‖ < 5 mm` over the cloud points. **Evidence**:
+  `pytest tests/integration/test_tier3_integration.py::test_alignment_recovers_ground_truth -v`.
+  Measured 1.476 mm. Scale (`|scale/scale_true − 1| < 0.01`), rotation geodesic error (`< 1.0°`)
+  and `alignment.converged is True` are still asserted as diagnostics.
+
+  The raw translation vector is **not** asserted, and asserting it was a defect in this AC. A
+  similarity's three components are not independently meaningful: `translation` is defined about
+  the origin, so with the fixture's centroid ~2.96 units away a scale error leaks in as
+  `translation_err ≈ scale_rel_err × ‖t_true‖`. The translation clause was therefore largely a
+  restatement of the scale clause multiplied by an arbitrary constant — how far the fixture happens
+  to sit from the origin — and it read 19.6 mm against a 5 mm bound while the alignment itself was
+  excellent. Composite error asks the question that actually matters (does the recovered transform
+  map points where the true one does) and is invariant to the choice of origin.
 - **AC6** (6.2) — Outlier removal keeps the body. **Evidence**:
   `PreprocessStats.outlier_fraction >= 0.8 * injected_outlier_fraction` and
   `n_after_outlier_removal >= 0.95 * n_inliers` on the fixture.
 - **AC7** (D9/D12) — Alignment is deterministic. **Evidence**:
-  `pytest tests/test_pointcloud.py::test_alignment_deterministic -v` — two runs on identical input
+  `pytest "tests/test_pointcloud.py::TestAlignCloudToSmpl::test_alignment_deterministic" -v` —
+  two runs on identical input
   give bitwise-identical `rotation`, `translation`, `scale`.
 
 ### Surface fit (7.1–7.5, 7.7)
@@ -899,9 +911,28 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
 
 ### Hygiene
 
+- **AC25** (7.B5) — **D is the clothing offset, not just a field that fits.** Mean
+  `|D − D_true| < 1.5 mm`, p95 `< 3.5 mm`, and torso mean `< 2.5 mm` on the synthetic fixture with a
+  NEUTRAL Tier-2 input. **Evidence**:
+  `pytest tests/integration/test_tier3_integration.py::test_displacement_recovers_d_true -v`.
+  Measured 1.030 / 2.425 / 1.713 mm.
+
+  This is deliberately **not** a chamfer criterion. Chamfer measures surface proximity, and a wrong
+  `D` can sit arbitrarily close to the cloud while carrying the wrong signal — which matters
+  precisely because `D`, not the mesh, is the PSD training target downstream. No existing AC
+  constrained `D` itself.
+
+  Two things make the measurement honest. The Tier-2 input is neutral (the mesh the fixture was
+  generated from), so S2 has nothing to correct and `D` should equal `D_true` directly; with a
+  perturbed Tier 2, `D` is defined against the S2-fitted base while `D_true` is defined against
+  neutral, so S2's drift (measured 2.161 mm) would be charged to `D`. And the **torso** bound
+  carries the claim, not the aggregate: 5138 of 6890 vertices have `D_true == 0`, so the trivial
+  solution `D ≡ 0` scores a mean of 1.017 mm — beating every real fit — while recovering none of the
+  offset. The test asserts against that null explicitly (torso 1.713 mm vs the null's 4.000 mm).
 - **AC22** — No new dependency. **Evidence**: `git diff pyproject.toml` shows no change to
-  `dependencies`; `grep -rn "import kaolin\|from kaolin\|import rtree" scantosmpl/ tests/` returns
-  nothing.
+  `dependencies`; `grep -rn "import kaolin\|from kaolin\|import rtree" scantosmpl/` returns
+  nothing (scoped to the package: test files may legitimately name a library in a comment or a
+  skip reason).
 - **AC23** — Lint + typecheck green. **Evidence**: `py-lint` and `py-typecheck` exit 0 on every
   changed module.
 - **AC24** — Full suite green. **Evidence**: `py-test` — `pytest tests/ -x --tb=short` exits 0, and

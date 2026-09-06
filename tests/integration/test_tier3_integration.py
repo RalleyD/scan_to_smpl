@@ -225,9 +225,32 @@ def test_fixture_generator_is_deterministic():
 # ---------------------------------------------------------------------------
 
 
+#: AC5's binding tolerance: mean pointwise disagreement between the recovered
+#: similarity and the true one, applied to the actual cloud points.
+AC5_COMPOSITE_TRANSFORM_ERROR_MM = 5.0
+
+
 @requires_smpl
 @requires_fixture
 def test_alignment_recovers_ground_truth(smpl_model, ground_truth):
+    """AC5 — S1 recovers the known similarity, measured as COMPOSITE pointwise
+    error rather than per-component error.
+
+    The three components of a similarity are not independently meaningful, and
+    asserting on the raw translation vector made this test measure the wrong
+    thing. `translation` is defined about the origin, but the cloud's centroid
+    sits ~2.96 units away from it, so a scale error leaks into the translation
+    residual as `translation_err ~= scale_rel_err * ||t_true||` — the translation
+    number was largely a restatement of the scale number, scaled by an arbitrary
+    constant (how far the fixture happens to sit from the origin). It read
+    19.6mm against a 5mm bound while the alignment itself was excellent.
+
+    What actually matters is whether the recovered transform maps points where
+    the true one does. Measured that way the alignment is 1.90mm — comfortably
+    inside 5mm — and the metric is invariant to where the origin happens to be.
+    Scale and rotation are still asserted, since they are individually
+    interpretable and cheap to check; the composite error is the binding one.
+    """
     true_vertices, faces = _true_vertices_and_faces(smpl_model)
     raw_cloud = load_pointcloud(CLOUD_PATH)
     cfg = Tier3Config(target_points=8000)
@@ -241,11 +264,31 @@ def test_alignment_recovers_ground_truth(smpl_model, ground_truth):
 
     scale_rel_err = abs(alignment.scale / scale_true - 1.0)
     rot_err_deg = _geodesic_angle_deg(alignment.rotation, rotation_true)
-    trans_err_m = float(np.linalg.norm(alignment.translation - translation_true))
 
+    pts = cleaned.points
+    mapped_recovered = alignment.scale * (pts @ alignment.rotation.T) + alignment.translation
+    mapped_true = scale_true * (pts @ rotation_true.T) + translation_true
+    composite_err_mm = float(
+        np.mean(np.linalg.norm(mapped_recovered - mapped_true, axis=1)) * 1000.0
+    )
+
+    debug_dir = Path("output/debug/surface")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    with open(debug_dir / "summary.txt", "a") as f:
+        f.write(
+            "\n\n=== AC5 alignment recovery ===\n"
+            f"composite pointwise error: {composite_err_mm:.3f}mm "
+            f"(bound {AC5_COMPOSITE_TRANSFORM_ERROR_MM}mm)\n"
+            f"diagnostics: scale rel err {scale_rel_err:.5f}, rotation {rot_err_deg:.4f} deg, "
+            f"raw translation {np.linalg.norm(alignment.translation - translation_true):.5f} m\n"
+        )
+
+    assert composite_err_mm < AC5_COMPOSITE_TRANSFORM_ERROR_MM, (
+        f"recovered similarity disagrees with the true one by {composite_err_mm:.2f}mm "
+        f"mean over {pts.shape[0]} cloud points"
+    )
     assert scale_rel_err < 0.01, f"scale rel err {scale_rel_err}"
     assert rot_err_deg < 1.0, f"rotation err {rot_err_deg} deg"
-    assert trans_err_m < 0.005, f"translation err {trans_err_m} m"
     assert alignment.converged is True
 
 
@@ -339,9 +382,24 @@ def test_real_cloud_chamfer(smpl_model, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+#: Tier-2 seeds the AC10 A/B is averaged over. A single seed is not enough: the
+#: effect is real but SMALL (mean −0.0142mm, sd 0.0023mm over five seeds), so one
+#: draw cannot distinguish it from noise and the assertion becomes a coin flip.
+#: This test previously did exactly that, and flipped sign on an unrelated change.
+AC10_SEEDS = (2, 5, 11)
+
+
 @requires_smpl
 @requires_fixture
 def test_semantic_weighting_ab(smpl_model):
+    """AC10 — semantic weighting beats uniform on the torso, across seeds.
+
+    Measured over five seeds with early stopping disabled (fixed 550-iteration
+    schedule, so neither arm can win by running longer): weighting wins on 5/5,
+    delta mean −0.0142mm, sd 0.0023mm, range [−0.0174, −0.0109]. The effect is
+    ~6x its own spread — consistent, but small in absolute terms; semantic
+    weighting is a real refinement, not a large one.
+    """
     cfg_on = Tier3Config(target_points=6000, use_semantic_weighting=True)
     cfg_off = Tier3Config(target_points=6000, use_semantic_weighting=False)
 
@@ -350,32 +408,53 @@ def test_semantic_weighting_ab(smpl_model):
     vertex_labels = smpl_part_labels(lbs_weights)
     torso_id = list(SMPL_PART_GROUPS).index("torso")
 
-    def _torso_cloud_to_mesh_mean_mm(cfg: Tier3Config) -> float:
-        tier2 = _perturbed_tier2(smpl_model, seed=2)  # identical init both times
+    def _torso_cloud_to_mesh_mean_mm(cfg: Tier3Config, seed: int) -> float:
+        tier2 = _perturbed_tier2(smpl_model, seed=seed)  # identical init both arms
         fit, _, aligned, _ = _run_s1_s2_s3(smpl_model, cfg, tier2, CLOUD_PATH)
         cloud_labels = transfer_labels_to_cloud(aligned.points, tier2.vertices, vertex_labels)
         torso_points = aligned.points[cloud_labels == torso_id]
         distances_m = point_to_surface_distances(torso_points, fit.vertices, faces)
         return float(np.mean(distances_m) * 1000.0)
 
-    mean_weighted = _torso_cloud_to_mesh_mean_mm(cfg_on)
-    mean_uniform = _torso_cloud_to_mesh_mean_mm(cfg_off)
+    per_seed = []
+    for seed in AC10_SEEDS:
+        weighted = _torso_cloud_to_mesh_mean_mm(cfg_on, seed)
+        uniform = _torso_cloud_to_mesh_mean_mm(cfg_off, seed)
+        per_seed.append(
+            {
+                "seed": seed,
+                "torso_cloud_to_mesh_mean_mm_weighted": weighted,
+                "torso_cloud_to_mesh_mean_mm_uniform": uniform,
+                "delta_mm": weighted - uniform,
+            }
+        )
+
+    deltas = np.array([row["delta_mm"] for row in per_seed])
 
     debug_dir = Path("output/debug/surface")
     debug_dir.mkdir(parents=True, exist_ok=True)
     with open(debug_dir / "semantic_ab.json", "w") as f:
         json.dump(
             {
-                "torso_cloud_to_mesh_mean_mm_weighted": mean_weighted,
-                "torso_cloud_to_mesh_mean_mm_uniform": mean_uniform,
+                "per_seed": per_seed,
+                "delta_mean_mm": float(deltas.mean()),
+                "delta_sd_mm": float(deltas.std(ddof=1)),
+                "seeds_favouring_weighting": int((deltas < 0).sum()),
             },
             f,
             indent=2,
         )
 
-    assert mean_weighted < mean_uniform, (
-        f"semantic weighting ({mean_weighted:.2f}mm) did not beat uniform "
-        f"({mean_uniform:.2f}mm) on the torso"
+    assert deltas.mean() < 0.0, (
+        f"semantic weighting did not beat uniform on the torso: mean delta "
+        f"{deltas.mean():+.4f}mm over seeds {AC10_SEEDS}"
+    )
+    # Every seed must agree in sign. A mean that is negative only because one
+    # seed dominates would be the same unmeasurable claim as before.
+    assert (deltas < 0).all(), (
+        f"semantic weighting is not consistent across seeds — per-seed deltas "
+        f"{np.round(deltas, 4).tolist()}mm. A mixed sign means the effect is "
+        f"noise-dominated and the AC is not measurable as written."
     )
 
 
@@ -502,6 +581,113 @@ def test_optimisation_completes_without_pathological_slowdown(smpl_model):
         f"S2+S3 took {elapsed:.1f}s at {aligned.n_points} points — ~10x the measured "
         f"29.4s baseline. This is a pathology guard, not a budget: something is "
         f"algorithmically wrong, not merely slow."
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC25 — D accuracy against the fixture's known d_true
+# ---------------------------------------------------------------------------
+
+#: Bounds on |D - D_true|, in mm, for the shipped config on the fixture.
+#: Measured 1.030 / 2.425 / 1.713 against a null (D == 0) of 1.017 / 4.000 / 4.000.
+AC25_D_ERR_MEAN_MM = 1.5
+AC25_D_ERR_P95_MM = 3.5
+AC25_D_ERR_TORSO_MM = 2.5
+
+
+def _d_true_field(smpl_model: SMPLModel) -> tuple[np.ndarray, np.ndarray]:
+    """Reconstruct the fixture's exact `D_true` using `make_fixture.py`'s OWN
+    code, so this is a genuine known-answer target rather than a reimplementation
+    that could drift from what actually generated the cloud.
+
+    Returns (d_true (6890,3) in metres, torso vertex mask)."""
+    make_fixture = _load_make_fixture_module()
+    base_vertices, faces = _true_vertices_and_faces(smpl_model)
+    lbs_weights = smpl_model.body_model.lbs_weights.detach().cpu().numpy()
+    torso_mask = smpl_part_labels(lbs_weights) == list(SMPL_PART_GROUPS).index("torso")
+    normals = make_fixture._vertex_normals(base_vertices, faces)
+    d_true = np.zeros_like(base_vertices)
+    d_true[torso_mask] = make_fixture.CLOTHING_OFFSET_M * normals[torso_mask]
+    return d_true, torso_mask
+
+
+@requires_smpl
+@requires_fixture
+def test_displacement_recovers_d_true(smpl_model):
+    """D must be the clothing offset, not merely a field that makes the surface
+    fit. Chamfer cannot discharge this: it measures surface proximity, and a
+    wrong D can be arbitrarily close to the cloud while carrying the wrong
+    signal — which matters because D, not the mesh, is the PSD training target
+    downstream (7.B5).
+
+    The Tier-2 input is NEUTRAL, matching the mesh the fixture was generated
+    from, so S2 has nothing to correct and D should equal D_true directly. With
+    a perturbed Tier 2 the comparison would be unfair by construction: D is
+    defined against the S2-fitted base while D_true is defined against neutral,
+    so any S2 drift is charged to D (measured 2.161mm of it).
+
+    The torso bound is the one that carries the claim. The aggregate mean CANNOT
+    be trusted alone: 5138 of 6890 vertices have D_true == 0, so the trivial
+    solution D == 0 scores a mean of 1.017mm and beats every real fit, while
+    recovering none of the actual offset. Assert against that null explicitly.
+    """
+    d_true, torso_mask = _d_true_field(smpl_model)
+    n_body = smpl_model.body_model.NUM_BODY_JOINTS * 3
+    faces = smpl_model.body_model.faces.astype(np.int64)
+
+    vertices, joints = _forward_vertices_joints(
+        smpl_model, np.zeros(10), np.zeros(n_body), np.zeros(3), np.zeros(3), 1.0
+    )
+    tier2 = RefinementResult(
+        betas=np.zeros(10, dtype=np.float32),
+        body_pose=np.zeros(n_body, dtype=np.float32),
+        global_orient=np.zeros(3, dtype=np.float32),
+        translation=np.zeros(3, dtype=np.float32),
+        scale=1.0,
+        vertices=vertices,
+        joints=joints,
+        metrics={"pa_mpjpe_mm": 32.0, "median_reproj_px": 45.0},
+    )
+
+    cfg = Tier3Config(use_semantic_weighting=False)  # shipped target_points=50_000
+    cleaned, _ = preprocess_cloud(load_pointcloud(CLOUD_PATH), cfg)
+    aligned, _ = align_cloud_to_smpl(cleaned, tier2.vertices, faces, cfg)
+    fit = Tier3SurfaceFitter(smpl_model, cfg).fit(tier2, aligned)
+
+    err_mm = np.linalg.norm(fit.displacements - d_true, axis=1) * 1000.0
+    null_mm = np.linalg.norm(d_true, axis=1) * 1000.0
+
+    debug_dir = Path("output/debug/surface")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    with open(debug_dir / "d_accuracy.json", "w") as f:
+        json.dump(
+            {
+                "d_err_mean_mm": float(err_mm.mean()),
+                "d_err_p95_mm": float(np.percentile(err_mm, 95)),
+                "d_err_torso_mm": float(err_mm[torso_mask].mean()),
+                "d_err_other_mm": float(err_mm[~torso_mask].mean()),
+                "d_magnitude_mean_mm": float(
+                    np.linalg.norm(fit.displacements, axis=1).mean() * 1000.0
+                ),
+                "d_true_magnitude_mean_mm": float(null_mm.mean()),
+                "null_torso_mm": float(null_mm[torso_mask].mean()),
+            },
+            f,
+            indent=2,
+        )
+
+    assert err_mm[torso_mask].mean() < AC25_D_ERR_TORSO_MM, (
+        f"D did not recover the injected clothing offset: torso error "
+        f"{err_mm[torso_mask].mean():.3f}mm, against {null_mm[torso_mask].mean():.3f}mm "
+        f"for the trivial D == 0 solution"
+    )
+    assert err_mm[torso_mask].mean() < 0.75 * null_mm[torso_mask].mean(), (
+        "D must beat the trivial D == 0 solution on the torso by a real margin, "
+        "not merely tie with it"
+    )
+    assert err_mm.mean() < AC25_D_ERR_MEAN_MM, f"mean |D - D_true| {err_mm.mean():.3f}mm"
+    assert np.percentile(err_mm, 95) < AC25_D_ERR_P95_MM, (
+        f"p95 |D - D_true| {np.percentile(err_mm, 95):.3f}mm"
     )
 
 
