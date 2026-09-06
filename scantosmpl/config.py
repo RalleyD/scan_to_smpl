@@ -201,8 +201,11 @@ class Tier3Config:
     # --- Preprocessing (unit-free, D8) ---
     outlier_nb_neighbors: int = 20
     outlier_std_ratio: float = 2.0
-    target_points: int = 50_000  # after downsample; 0 = keep all
-    voxel_fraction_of_bbox: float = 0.002  # voxel = fraction * bbox diagonal (source units)
+    target_points: int = 50_000  # exact decimation target; 0 = keep all
+    # UNUSED. Declared by master §5.2 so the config schema stays stable, but
+    # decimation selects by index rather than voxelising (a grid is frame-
+    # dependent, which broke D8) — changing this has no effect.
+    voxel_fraction_of_bbox: float = 0.002
     estimate_normals: bool = True
     normal_knn: int = 30
 

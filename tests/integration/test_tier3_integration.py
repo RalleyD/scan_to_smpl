@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -532,6 +533,18 @@ def test_similarity_invariance(smpl_model):
 
     d_mean_diff_mm = float(np.mean(np.abs(fit_a.displacements - fit_b.displacements)) * 1000.0)
     alignment_scale_diff = abs(alignment_a.scale - alignment_b.scale)
+
+    # Log the achieved margin, not just pass/fail: this is the headline number
+    # for AC18, and a run that squeaks under 0.5mm means something very different
+    # from one at 0.0. Visible with `--log-cli-level=INFO`.
+    logging.getLogger(__name__).info(
+        "AC18: D mean difference across similarity frames = %.6f mm (tolerance %.1f mm); "
+        "alignment scales %.5f vs %.5f",
+        d_mean_diff_mm,
+        AC18_D_MEAN_TOLERANCE_MM,
+        alignment_a.scale,
+        alignment_b.scale,
+    )
 
     assert alignment_scale_diff > 0.01, (
         "the two alignments should differ substantially — otherwise this test isn't "

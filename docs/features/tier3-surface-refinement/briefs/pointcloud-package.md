@@ -54,15 +54,22 @@ consume, plus a `CloudAlignment` recording exactly what transform was applied.
    `max_points` applies a deterministic stride subsample (`points[::step]`), **not** a random one.
    **Verify**: `py-typecheck` on `scantosmpl/pointcloud/io.py`.
 
-2. **`preprocess.py` — unit-free cleaning.** `preprocess_cloud` runs, in order: statistical outlier
-   removal (`remove_statistical_outlier`, `nb_neighbors` / `std_ratio`), then a voxel downsample
-   whose voxel size is `voxel_fraction_of_bbox * bbox_diagonal` **in source units** (master D8 — a
-   metric voxel size is meaningless before alignment and is the bug this step exists to avoid),
-   iterating the fraction upward if the result still exceeds `target_points`. Then optional normal
-   estimation (`estimate_normals` with `KDTreeSearchParamKNN(normal_knn)`). Populate every
-   `PreprocessStats` field. `frame`/`units` pass through unchanged.
-   **Verify**: `py-test` — `pytest tests/test_pointcloud.py -k preprocess -v`, including a test that
-   the same cloud scaled by 1000× produces the same output point count (±5%).
+2. **`preprocess.py` — similarity-equivariant cleaning.** `preprocess_cloud` runs, in order:
+   statistical outlier removal (`remove_statistical_outlier`, `nb_neighbors` / `std_ratio`), then
+   decimation to exactly `target_points` by uniform index selection —
+   `(arange(target) * n) // target` — then optional normal estimation (`estimate_normals` with
+   `KDTreeSearchParamKNN(normal_knn)`). Populate every `PreprocessStats` field
+   (`voxel_size_source_units` is vestigial and always 0.0). `frame`/`units` pass through unchanged.
+
+   Master D8 is the binding constraint and it is stronger than unit-freedom: decimation must be
+   *frame*-free, not merely scale-free. A voxel grid is neither (its size came from an axis-aligned
+   bbox, and the grid itself is laid out in the current frame), which leaked 1.96mm into `D`.
+   Selecting by index depends on nothing but the point count.
+   **Verify**: `py-test` — `pytest tests/test_pointcloud.py -k preprocess -v`, including
+   `test_preprocess_is_similarity_equivariant`: under a random similarity the output points must
+   match to float64 round-off (1e-9), not merely agree on a point count. Use a *surface* fixture
+   (`_sphere_cloud`) for anything touching normals — on a solid cloud the k-NN neighbourhood is
+   isotropic and the PCA normal is numerically arbitrary.
 
 3. **`align.py` — PCA triad + 24-candidate ICP.** `pca_triad` returns centroid, eigenvector columns
    ordered by descending eigenvalue, and `sqrt(eigenvalue)` extents. `enumerate_proper_rotations`

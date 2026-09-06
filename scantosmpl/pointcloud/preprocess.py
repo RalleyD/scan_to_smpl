@@ -1,9 +1,11 @@
-"""Unit-free point cloud cleaning: outlier removal → voxel downsample → normals.
+"""Unit-free point cloud cleaning: outlier removal → decimation → normals.
 
 Everything here runs **before** alignment, so the cloud's units are arbitrary
-(master D8). No step may use a metric constant: the voxel size is a fraction of
-the cloud's own bounding-box diagonal, and the outlier / normal steps are
-relative statistics, so the same config works on a cloud scaled by 1e-3 or 1e3.
+(master D8). No step may use a metric constant, and — the stronger requirement —
+no step may depend on the cloud's *frame* either: preprocessing a similarity-
+transformed cloud must give exactly the similarity-transformed preprocessed
+cloud. Outlier removal and normal estimation are relative k-NN statistics, and
+decimation selects by index, so all three satisfy that by construction.
 
 Deterministic: no RNG anywhere in this path (master D12).
 """
@@ -19,23 +21,21 @@ from scantosmpl.pointcloud.io import PointCloud, from_open3d
 
 logger = logging.getLogger(__name__)
 
-# Safety net for the voxel-size search: each pass grows the voxel, so this only
-# bounds pathological inputs (e.g. a target of 1 point).
-_MAX_VOXEL_PASSES = 20
-_MIN_VOXEL_GROWTH = 1.1
-
 
 class PreprocessConfigLike(Protocol):
     """The `Tier3Config` fields `preprocess_cloud` reads (master §5.2).
 
     Declared structurally so `scantosmpl.pointcloud` never imports `config.py`
     — `Tier3Config` satisfies this protocol by construction.
+
+    Note `voxel_fraction_of_bbox` is absent: `Tier3Config` still declares it
+    (master §5.2) but decimation no longer voxelises, so this module does not
+    read it. See :func:`preprocess_cloud`.
     """
 
     outlier_nb_neighbors: int
     outlier_std_ratio: float
     target_points: int
-    voxel_fraction_of_bbox: float
     estimate_normals: bool
     normal_knn: int
 
@@ -48,7 +48,11 @@ class PreprocessStats:
     n_after_outlier_removal: int
     n_output: int
     outlier_fraction: float
+    #: Vestigial. Master §5.1 declares it, so the field stays for schema
+    #: stability, but decimation no longer voxelises and this is always 0.0.
     voxel_size_source_units: float
+    #: Diagnostic only — reported, never an input to a decision. The box is
+    #: AXIS-ALIGNED, hence not rotation-invariant; nothing may branch on it.
     bbox_diagonal_source_units: float
     normals_estimated: bool
 
@@ -68,6 +72,26 @@ def bbox_diagonal(points: np.ndarray) -> float:
     return float(np.linalg.norm(extent))
 
 
+def _uniform_index_selection(n: int, target: int) -> np.ndarray:
+    """``target`` indices spread evenly over ``range(n)``, chosen by index alone.
+
+    ``(arange(target) * n) // target`` is strictly increasing whenever
+    ``n >= target`` — consecutive real values differ by ``n / target >= 1``, so
+    their floors cannot collide — giving exactly ``target`` distinct, ordered
+    indices. Preferred over ``points[::ceil(n / target)]``, which can only yield
+    ``n``, ``n/2``, ``n/3``, … and so discards far more than asked for near a
+    stride boundary (60160 points -> 30080 for a target of 50000).
+
+    Args:
+        n: Population size.
+        target: Number of indices to select; must satisfy ``0 < target <= n``.
+
+    Returns:
+        (target,) int64 indices, strictly increasing.
+    """
+    return (np.arange(target, dtype=np.int64) * n) // target
+
+
 def preprocess_cloud(
     cloud: PointCloud,
     cfg: PreprocessConfigLike,
@@ -76,10 +100,26 @@ def preprocess_cloud(
 
     Order (master D8):
       1. Statistical outlier removal (k-NN distance statistics — scale free).
-      2. Voxel downsample with ``voxel = voxel_fraction_of_bbox * bbox_diagonal``
-         measured in SOURCE units, growing the fraction until the result is at
-         most ``cfg.target_points`` (``target_points = 0`` skips downsampling).
+      2. Decimation to exactly ``cfg.target_points`` by uniform index selection
+         (``target_points = 0``, or a cloud already at or under the target,
+         skips it).
       3. Optional normal estimation via k-NN PCA (``KDTreeSearchParamKNN``).
+
+    Step 2 used to voxelise, and that broke D8 twice over: the voxel size came
+    from the AXIS-ALIGNED bbox diagonal, which is not rotation-invariant, and
+    the grid itself is laid out in the cloud's current frame, so even a fixed
+    voxel size lands differently once the cloud rotates. The count-targeting
+    loop then stopped at a different size per frame (measured: 4429 vs 4469
+    points for one cloud under a rigid rotation), and that count difference
+    propagated all the way to a 1.96mm spread in the fitted displacement field.
+    Selecting by index depends on nothing but the point count, so the whole
+    function is now exactly similarity-equivariant.
+
+    The tradeoff taken knowingly: index selection preserves the input's density
+    distribution rather than equalising it, as a voxel grid would. Meshroom
+    clouds are already roughly area-uniform and outlier removal runs first. If
+    equalisation ever does matter, farthest-point sampling from a frame-
+    independent seed is the equivariant way to get it.
 
     Args:
         cloud: Input cloud, normally straight from :func:`load_pointcloud`.
@@ -106,30 +146,13 @@ def preprocess_cloud(
         )
     n_after_outlier = len(pcd.points)
 
-    # --- 2. Unit-free voxel downsample ------------------------------------
-    # Diagonal is measured AFTER outlier removal: stray points would otherwise
-    # inflate the bbox and blow the voxel size up with it.
+    # --- 2. Frame-independent decimation ----------------------------------
+    # Measured AFTER outlier removal so stray points cannot inflate the box.
+    # Diagnostic only: nothing below branches on it (see PreprocessStats).
     diag = bbox_diagonal(np.asarray(pcd.points))
-    voxel_size = 0.0
 
-    if cfg.target_points > 0 and n_after_outlier > cfg.target_points and diag > 0.0:
-        voxel_size = cfg.voxel_fraction_of_bbox * diag
-        down = pcd.voxel_down_sample(voxel_size=voxel_size)
-        for _ in range(_MAX_VOXEL_PASSES):
-            n_down = len(down.points)
-            if n_down <= cfg.target_points:
-                break
-            growth = max(_MIN_VOXEL_GROWTH, (n_down / cfg.target_points) ** (1.0 / 3.0))
-            voxel_size *= growth
-            down = pcd.voxel_down_sample(voxel_size=voxel_size)
-        else:
-            logger.warning(
-                "Voxel search hit %d passes; %d points remain (target %d)",
-                _MAX_VOXEL_PASSES,
-                len(down.points),
-                cfg.target_points,
-            )
-        pcd = down
+    if 0 < cfg.target_points < n_after_outlier:
+        pcd = pcd.select_by_index(_uniform_index_selection(n_after_outlier, cfg.target_points))
 
     # --- 3. Normal estimation ---------------------------------------------
     normals_estimated = False
@@ -145,16 +168,15 @@ def preprocess_cloud(
         n_after_outlier_removal=n_after_outlier,
         n_output=out.n_points,
         outlier_fraction=(float(n_input - n_after_outlier) / n_input if n_input > 0 else 0.0),
-        voxel_size_source_units=float(voxel_size),
+        voxel_size_source_units=0.0,
         bbox_diagonal_source_units=float(diag),
         normals_estimated=normals_estimated,
     )
     logger.info(
-        "Preprocess: %d -> %d (outliers) -> %d points | voxel=%.6g diag=%.6g (source units)",
+        "Preprocess: %d -> %d (outliers) -> %d points | diag=%.6g (source units)",
         stats.n_input,
         stats.n_after_outlier_removal,
         stats.n_output,
-        stats.voxel_size_source_units,
         stats.bbox_diagonal_source_units,
     )
     return out, stats

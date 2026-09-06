@@ -162,6 +162,24 @@ def _grid_cloud(n_per_axis: int = 21) -> np.ndarray:
     return np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
 
 
+def _sphere_cloud(n: int = 4000) -> np.ndarray:
+    """A deterministic (no RNG) near-uniform unit-sphere SURFACE via Fibonacci lattice.
+
+    Use this, not `_grid_cloud`, whenever a test touches estimated normals.
+    `_grid_cloud` is a *solid*, so an interior point's k-NN neighbourhood is
+    isotropic and has no surface normal to find — the PCA minor eigenvector is
+    then numerically arbitrary and varies wildly between two frames of the same
+    cloud. On this surface the same comparison agrees to 4e-16.
+    """
+    i = np.arange(n, dtype=np.float64) + 0.5
+    polar = np.arccos(1.0 - 2.0 * i / n)
+    azimuth = np.pi * (1.0 + 5.0**0.5) * i
+    return np.stack(
+        [np.cos(azimuth) * np.sin(polar), np.sin(azimuth) * np.sin(polar), np.cos(polar)],
+        axis=1,
+    )
+
+
 def _sample_mesh_surface(
     vertices: np.ndarray, faces: np.ndarray, n_points: int, seed: int
 ) -> np.ndarray:
@@ -367,8 +385,9 @@ class TestPreprocess:
         assert stats.n_input == pts.shape[0]
         assert stats.n_after_outlier_removal <= stats.n_input
         assert stats.n_output == out.n_points
-        assert stats.n_output <= 1.05 * cfg.target_points
-        assert stats.voxel_size_source_units > 0.0
+        # Index selection hits the target EXACTLY, unlike the old voxel search.
+        assert stats.n_output == cfg.target_points
+        assert stats.voxel_size_source_units == 0.0  # vestigial field
         assert stats.bbox_diagonal_source_units == pytest.approx(np.sqrt(3.0), abs=1e-6)
         assert stats.normals_estimated is True
         assert out.normals is not None
@@ -396,11 +415,11 @@ class TestPreprocess:
         assert stats.outlier_fraction == pytest.approx(injected_fraction, abs=0.01)
         assert stats.n_after_outlier_removal == 3000
 
-    def test_voxel_downsample_is_scale_invariant(self):
+    def test_downsample_is_scale_invariant(self):
         """The explicit brief requirement: the same cloud scaled by 1000x
-        produces the same output point count (+/- 5%) — master D8."""
+        produces the same output point count — master D8."""
         pts = _grid_cloud(21)
-        cfg = _PreprocessCfg(outlier_nb_neighbors=8, target_points=500, voxel_fraction_of_bbox=0.01)
+        cfg = _PreprocessCfg(outlier_nb_neighbors=8, target_points=500)
 
         cloud_a = PointCloud(points=pts, normals=None, colors=None, source_path=Path("a.ply"))
         cloud_b = PointCloud(
@@ -410,10 +429,55 @@ class TestPreprocess:
         _, stats_a = preprocess_cloud(cloud_a, cfg)
         _, stats_b = preprocess_cloud(cloud_b, cfg)
 
-        assert stats_b.voxel_size_source_units == pytest.approx(
-            1000.0 * stats_a.voxel_size_source_units, rel=1e-6
+        assert stats_a.n_output == stats_b.n_output == cfg.target_points
+
+    def test_preprocess_is_similarity_equivariant(self):
+        """Preprocessing a transformed cloud gives the transformed preprocessed
+        cloud, to float64 round-off (master D8).
+
+        The strong form of D8, and the one the voxel downsample failed: scale
+        invariance alone is not enough, because a voxel GRID is laid out in the
+        cloud's current frame, so rotation changed which points survived even at
+        a fixed voxel size. That leaked a 1.96mm spread into the fitted
+        displacement field (AC18). Index selection is equivariant by
+        construction, so this asserts bitwise-tight agreement, not a tolerance.
+        """
+        rng = np.random.default_rng(7)
+        pts = _sphere_cloud(4000)  # a SURFACE — normals are ill-posed on a solid
+        cfg = _PreprocessCfg(
+            outlier_nb_neighbors=8, target_points=1000, estimate_normals=True, normal_knn=20
         )
-        assert stats_a.n_output == pytest.approx(stats_b.n_output, rel=0.05)
+
+        # A random similarity: proper rotation (via QR, det fixed to +1),
+        # non-trivial scale, off-origin translation.
+        q, r = np.linalg.qr(rng.normal(size=(3, 3)))
+        rot = q * np.sign(np.diag(r))
+        if np.linalg.det(rot) < 0:
+            rot[:, 0] *= -1.0
+        scale, trans = 4.2, np.array([-3.0, 17.5, 0.25])
+
+        cloud_a = PointCloud(points=pts, normals=None, colors=None, source_path=Path("a.ply"))
+        cloud_b = PointCloud(
+            points=scale * pts @ rot.T + trans,
+            normals=None,
+            colors=None,
+            source_path=Path("b.ply"),
+        )
+
+        out_a, stats_a = preprocess_cloud(cloud_a, cfg)
+        out_b, stats_b = preprocess_cloud(cloud_b, cfg)
+
+        assert stats_a.n_after_outlier_removal == stats_b.n_after_outlier_removal
+        assert stats_a.n_output == stats_b.n_output == cfg.target_points
+
+        expected = scale * out_a.points @ rot.T + trans
+        assert np.allclose(out_b.points, expected, rtol=0.0, atol=1e-9)
+
+        # Normals rotate but do not scale; sign is not orientation-consistent by
+        # design (photogrammetry normals are unreliable), so compare |cos|.
+        assert out_a.normals is not None and out_b.normals is not None
+        cos = np.einsum("ij,ij->i", out_b.normals, out_a.normals @ rot.T)
+        assert np.allclose(np.abs(cos), 1.0, atol=1e-6)
 
     def test_target_points_zero_skips_downsample(self):
         pts = _grid_cloud(10)

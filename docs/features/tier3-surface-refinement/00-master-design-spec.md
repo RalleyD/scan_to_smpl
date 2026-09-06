@@ -99,10 +99,26 @@ Locked choices from the clarifying-question rounds, with rationale.
   this (correct, testable) mechanism rather than height slices. `FittingConfig.body_part_weights`
   already declares the six group names this produces and is finally wired up.
 
-- **D8 (Downsampling is unit-free).** A metric voxel size is meaningless before alignment — a
-  Meshroom cloud's units are arbitrary. Preprocessing derives its voxel size from a fraction of the
-  cloud's own bbox diagonal and targets a point count, so the same config works on a cloud scaled
-  by 10⁻³ or 10³.
+- **D8 (Preprocessing is similarity-equivariant).** Not merely unit-free — *frame*-free.
+  Preprocessing a similarity-transformed cloud must yield exactly the similarity-transformed
+  preprocessed cloud, because Tier 3's output is a displacement field and any frame dependence
+  upstream leaks straight into `D` (this is what AC18 measures).
+
+  Unit-freedom alone is insufficient, and the original voxel formulation proved it: a voxel size
+  taken as a fraction of the cloud's own bbox diagonal *is* scale-free, but the bbox is
+  **axis-aligned** and so not rotation-invariant, and the voxel **grid** is laid out in the cloud's
+  current frame, so even a fixed voxel size retains different points once the cloud rotates.
+  Measured: 4429 vs 4469 surviving points for one cloud under a rigid rotation, propagating to a
+  1.96mm spread in `D`.
+
+  Decimation therefore selects **by index** — `(arange(target) * n) // target`, which depends on
+  nothing but the point count, hits `target_points` exactly, and is equivariant by construction
+  (measured: `D` bitwise identical across frames). Outlier removal and normal estimation are
+  relative k-NN statistics and were already equivariant. The knowing tradeoff is that index
+  selection preserves the input's density distribution rather than equalising it as a voxel grid
+  would; Meshroom clouds are already roughly area-uniform and outlier removal runs first. If
+  equalisation is ever needed, farthest-point sampling from a frame-independent seed is the
+  equivariant way to get it.
 
 - **D9 (PCA init is disambiguated by exhaustive enumeration, not heuristics).** PCA axes of a body
   are sign- and (for near-degenerate eigenvalues) order-ambiguous. Rather than guessing an up-axis,
@@ -130,8 +146,9 @@ Locked choices from the clarifying-question rounds, with rationale.
 ## 3. Scope
 
 **In scope**
-- `scantosmpl/pointcloud/`: `io.py` (PLY/OBJ load), `preprocess.py` (outlier removal, unit-free
-  downsample, normal estimation), `align.py` (PCA init + 24-candidate ICP with scale),
+- `scantosmpl/pointcloud/`: `io.py` (PLY/OBJ load), `preprocess.py` (outlier removal,
+  similarity-equivariant decimation, normal estimation), `align.py` (PCA init + 24-candidate ICP
+  with scale),
   `segment.py` (`lbs_weights`-derived part labels + nearest-vertex transfer to cloud).
 - `scantosmpl/evaluation/surface_metrics.py`: the binding 7.M metric — point-to-surface cloud→mesh,
   vertex-to-point mesh→cloud, both reported separately, plus the tessellation floor.
@@ -219,8 +236,8 @@ class PreprocessStats:
     n_after_outlier_removal: int
     n_output: int
     outlier_fraction: float       # (n_input - n_after_outlier_removal) / n_input
-    voxel_size_source_units: float
-    bbox_diagonal_source_units: float
+    voxel_size_source_units: float    # vestigial under D8; always 0.0, kept for schema stability
+    bbox_diagonal_source_units: float # DIAGNOSTIC ONLY — axis-aligned, so nothing may branch on it
     normals_estimated: bool
 ```
 
@@ -342,8 +359,8 @@ class Tier3Config:
     # --- Preprocessing (unit-free, D8) ---
     outlier_nb_neighbors: int = 20
     outlier_std_ratio: float = 2.0
-    target_points: int = 50_000          # after downsample; 0 = keep all
-    voxel_fraction_of_bbox: float = 0.002   # voxel = fraction * bbox diagonal (source units)
+    target_points: int = 50_000          # exact decimation target; 0 = keep all
+    voxel_fraction_of_bbox: float = 0.002   # UNUSED under D8 (no voxel grid); kept for schema stability
     estimate_normals: bool = True
     normal_knn: int = 30
 
@@ -396,9 +413,9 @@ def save_pointcloud(cloud: PointCloud, path: Path) -> None:
 
 ```python
 def preprocess_cloud(cloud: PointCloud, cfg: Tier3Config) -> tuple[PointCloud, PreprocessStats]:
-    """Statistical outlier removal -> unit-free voxel downsample to ~cfg.target_points
-    -> optional normal estimation. Frame and units are unchanged (still 'source').
-    Deterministic: no RNG anywhere in this path (D12)."""
+    """Statistical outlier removal -> index-selection decimation to exactly
+    cfg.target_points -> optional normal estimation. Frame and units are unchanged
+    (still 'source'). Similarity-equivariant (D8); deterministic, no RNG (D12)."""
 ```
 
 **`scantosmpl/pointcloud/align.py`**
