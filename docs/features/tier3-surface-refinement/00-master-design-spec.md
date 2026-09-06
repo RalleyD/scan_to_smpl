@@ -935,9 +935,18 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
   skip reason).
 - **AC23** — Lint + typecheck green. **Evidence**: `py-lint` and `py-typecheck` exit 0 on every
   changed module.
-- **AC24** — Full suite green. **Evidence**: `py-test` — `pytest tests/ -x --tb=short` exits 0, and
-  `pytest tests/integration/test_tier3_integration.py -v` passes (real-cloud test may skip; the skip
-  reason must name the missing file).
+- **AC24** — Full suite green **for Tier 3**. **Evidence**:
+  `pytest tests/integration/test_tier3_integration.py -v` passes in full (the real-cloud test may
+  skip; the skip reason must name the missing file), and `pytest tests/ --tb=short` leaves **only**
+  the three pre-existing Tier-1 failures — `test_consensus.py::TestBetaAggregation::
+  test_weighted_shifts_toward_high_weight` and two in `test_hmr_integration.py` — verified against
+  baseline `96e2359`, i.e. failing before this feature branched and untouched by it.
+
+  Scoped deliberately. The original "`pytest tests/ -x` exits 0" is unachievable for reasons Tier 3
+  does not own and must not silently fix: `-x` also stops at the first of those three, hiding
+  everything after it. A Tier 3 AC that can only be discharged by repairing Tier 1 either blocks
+  this feature on unrelated work or invites quietly patching another tier's tests — both worse than
+  naming the exception. Any *fourth* failure fails this AC.
 
 ## 11. Risks
 
