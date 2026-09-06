@@ -27,6 +27,10 @@ from scipy.spatial.transform import Rotation
 
 from scantosmpl.fitting.optimiser import RefinementResult
 from scantosmpl.fitting.surface import (
+    _CONVERGENCE_LOSS_EPS,
+    _CONVERGENCE_MIN_ITERS,
+    _CONVERGENCE_PATIENCE,
+    _CONVERGENCE_REL_TOL,
     DEFAULT_SURFACE_STAGES,
     SurfaceFitResult,
     SurfaceStage,
@@ -420,6 +424,94 @@ class TestLockBetas:
 
 
 # ---------------------------------------------------------------------------
+# Early stopping — patience + best-loss restore
+# ---------------------------------------------------------------------------
+
+
+@requires_smpl
+class TestEarlyStopping:
+    """The stopping rule must mean "the loss has stopped moving", not "one step
+    happened to be small". The bare single-iteration relative test held on
+    159/299 S2 and 155/249 S3 iterations — over half — so it was sampling noise,
+    and S3 truncated anywhere from iteration 20 to 111 across inputs differing by
+    1e-7 m."""
+
+    def test_early_stop_requires_consecutive_quiet_iterations(self):
+        """Directly checks the patience contract against the recorded history:
+        any stage that stopped short must have been quiet for the whole final
+        `_CONVERGENCE_PATIENCE` window, not just on its last step."""
+        model = _make_model()
+        tier2 = _neutral_tier2(model)
+        faces = model.body_model.faces.astype(np.int64)
+        normals = _vertex_normals_np(tier2.vertices, faces)
+        target = tier2.vertices + 0.003 * normals
+        cloud = _cloud_from_vertices(target, normals=normals)
+
+        fitter = Tier3SurfaceFitter(model, _SurfaceCfg(use_semantic_weighting=False))
+        result = fitter.fit(tier2, cloud)
+
+        stopped_early = False
+        for stage in DEFAULT_SURFACE_STAGES:
+            history = result.loss_history[stage.name]
+            if len(history) >= stage.n_iterations:
+                continue  # ran the full schedule — patience never applied
+            stopped_early = True
+            assert len(history) > _CONVERGENCE_MIN_ITERS
+            window = history[-(_CONVERGENCE_PATIENCE + 1) :]
+            for prev, cur in zip(window[:-1], window[1:], strict=True):
+                denom = max(abs(prev), _CONVERGENCE_LOSS_EPS)
+                assert abs(prev - cur) < _CONVERGENCE_REL_TOL * denom, (
+                    f"stage {stage.name!r} stopped at iteration {len(history)} but the "
+                    f"final {_CONVERGENCE_PATIENCE}-iteration window was not quiet "
+                    f"throughout — patience is not being enforced"
+                )
+        assert stopped_early, (
+            "neither stage stopped early on this near-converged scenario, so this "
+            "test asserted nothing — pick a scenario that does converge"
+        )
+
+    def test_returns_best_iterate_not_last(self):
+        """A deliberately divergent learning rate, where the loss climbs steadily
+        away from its first iterate. Returning `last` hands back a fit far worse
+        than the Tier 2 input the stage started from; returning `best` cannot.
+
+        Also pins the ordering the implementation depends on: `best_params` is
+        snapshotted BEFORE `optimiser.step()`, so it pairs with the loss actually
+        evaluated at those parameters. Snapshotting after the step pairs each loss
+        with the NEXT iterate — silent at a sane learning rate, and at this one it
+        returned a mesh 777mm from the target while reporting the correct best
+        loss, which is exactly the failure this test would otherwise miss.
+        """
+        model = _make_model()
+        tier2 = _neutral_tier2(model)
+        faces = model.body_model.faces.astype(np.int64)
+        normals = _vertex_normals_np(tier2.vertices, faces)
+        offset_m = 0.004
+        target = tier2.vertices + offset_m * normals
+        cloud = _cloud_from_vertices(target, normals=normals)
+
+        stage = dataclasses.replace(DEFAULT_SURFACE_STAGES[1], n_iterations=120, learning_rate=0.05)
+        fitter = Tier3SurfaceFitter(model, _SurfaceCfg(use_semantic_weighting=False))
+        result = fitter.fit(tier2, cloud, stages=[stage])
+
+        history = result.loss_history["displacement"]
+        assert history[-1] > 5.0 * min(history), (
+            f"this scenario was supposed to diverge, but the final loss "
+            f"({history[-1]:.3e}) is not much worse than the best ({min(history):.3e}) "
+            f"— the assertions below would prove nothing"
+        )
+
+        # Never worse than where the stage started. The initial iterate (D == 0)
+        # sits exactly `offset_m` from the target, and here it IS the best one, so
+        # this bound is tight: a mismatched snapshot lands orders of magnitude out.
+        err = np.linalg.norm(result.vertices - target, axis=1).mean()
+        assert err <= offset_m + 1e-9, (
+            f"returned an iterate worse than the stage's own starting point: mean "
+            f"vertex error {err * 1000:.1f}mm vs {offset_m * 1000:.1f}mm at D == 0"
+        )
+
+
+# ---------------------------------------------------------------------------
 # AC12 (7.5) — pose plausibility + no new self-intersections
 # ---------------------------------------------------------------------------
 
@@ -510,8 +602,8 @@ class TestPosePlausibility:
 
 
 # ---------------------------------------------------------------------------
-# Wall-clock sanity (informs AC13's evidence; the binding 60s gate is asserted
-# by the fixture integration test owned by tier3-pipeline-artefacts)
+# Wall-clock sanity — reports the number; no performance budget is asserted
+# anywhere any more (AC13 retired, see the integration test's docstring)
 # ---------------------------------------------------------------------------
 
 
@@ -520,7 +612,7 @@ class TestPosePlausibility:
 class TestWallClock:
     def test_s2_s3_wall_clock_at_50k_points(self):
         if not torch.cuda.is_available():
-            pytest.skip("GPU required for the AC13 wall-clock measurement")
+            pytest.skip("GPU required for the wall-clock measurement")
 
         model = _make_model()
         tier2 = _neutral_tier2(model)
@@ -543,21 +635,17 @@ class TestWallClock:
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - start
 
-        # Generous bound: this file's job is to report the number (see the
-        # returned BUILD_RESULT notes), not to be the binding AC13 gate (that's
-        # `tests/integration/test_tier3_integration.py::test_optimisation_under_60s`,
-        # owned by `tier3-pipeline-artefacts`, run against the real fixture cloud
-        # rather than this file's synthetic tiled-duplicate one).
+        # A pathology guard, deliberately generous — this file's job is to report
+        # the number, and no performance budget is asserted anywhere any more.
         #
-        # 90.0 -> 150.0 (Review iteration 2): this scenario's tiled/duplicated cloud
-        # makes `normal_consistency_loss` genuinely non-convergent (loss RISES over
-        # the 250-iteration displacement stage rather than plateauing — a documented
-        # `surface_losses.py` finding, not an early-stopping tuning problem), so it
-        # always runs the FULL S3 budget regardless of the early-stop tolerance.
-        # Measured 39-107s for byte-identical code across repeated runs on this
-        # shared dev machine (GPU contention from concurrent sibling-brief work this
-        # iteration) — a 2.7x spread with no code change. 150s keeps a real margin
-        # above the observed high end without being a no-op bound.
+        # The 150s was set when this scenario's tiled/duplicated cloud made
+        # `normal_consistency_loss` non-convergent, so S3 always burned its full
+        # 250-iteration budget. That term now ships off, but the bound stays put:
+        # the reason it was raised from 90s in the first place still holds, and is
+        # unrelated to the loss — byte-identical code measured 39-107s across
+        # repeated runs on this shared dev machine (a 2.7x spread from GPU
+        # contention alone). Any bound tight enough to be a real budget here would
+        # be flaky for reasons that have nothing to do with the code under test.
         assert elapsed < 150.0, f"S2+S3 at 50K points took {elapsed:.1f}s"
 
 

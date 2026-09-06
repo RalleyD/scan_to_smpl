@@ -114,7 +114,8 @@ alignment error, which is what PSD boundary requirement 7.B5 demands.
 - The fitter never imports `surface_metrics` (7.M6 separation).
 - No `pyproject.toml` change (AC22).
 - `notes` in the returned `BUILD_RESULT` calls out any spec deviation, blocker, or proposed new
-  skill — in particular report the **measured** S2+S3 wall-clock at 50 K points on GPU, since AC13
-  gates at 60 s against an estimated 41 s budget, and flag immediately if the two default stages'
-  550 total iterations prove insufficient for convergence (that is a spec correction, not something
-  to silently raise). State explicitly that `pipeline-smoke` was not run and why.
+  skill — in particular report the **measured** S2+S3 wall-clock at 50 K points on GPU. That number
+  is recorded as evidence only: AC13's 60 s budget is RETIRED, and nothing asserts a performance
+  target (only a ~10× pathology guard). Flag immediately if the two default stages' 550 total
+  iterations prove insufficient for convergence — that is a spec correction, not something to
+  silently raise. State explicitly that `pipeline-smoke` was not run and why.

@@ -110,10 +110,11 @@ collide on them.
    **Verify**: `py-lint`, `py-typecheck`.
 
 6. **Integration tests.** `tests/integration/test_tier3_integration.py` discharges AC5, AC6, AC8,
-   AC9, AC10, AC11, AC13 and AC18:
+   AC9, AC10, AC11 and AC18:
    - `test_alignment_recovers_ground_truth` (AC5), `test_preprocess_removes_outliers` (AC6),
      `test_refinement_improves_over_tier2` (AC8), `test_semantic_weighting_ab` (AC10),
-     `test_optimisation_under_60s` (AC13, `@pytest.mark.gpu`).
+     `test_optimisation_completes_without_pathological_slowdown` (`@pytest.mark.gpu`;
+     AC13's 60s budget is RETIRED — this is a ~10x pathology guard, not a budget).
    - `test_beta_refinement_improves_proportions` (AC11) — **`lock_betas=False` only**. Shoulder
      width (joints 16↔17) and waist girth must move toward the fixture's ground-truth mesh relative
      to the Tier 2 input; write both deltas to `summary.txt`. This test must **not** run in the

@@ -1,6 +1,6 @@
 """Tier 3 end-to-end integration tests.
 
-Discharges AC5, AC6, AC8, AC9, AC10, AC11, AC13, AC18 (master §10) plus the fixture's
+Discharges AC5, AC6, AC8, AC9, AC10, AC11, AC18 (master §10) plus the fixture's
 own determinism check (brief step 3). The synthetic fixture
 (`tests/integration/fixtures/synthetic_cloud/`) is a KNOWN-ANSWER test (master D11):
 alignment recovery, chamfer improvement and D recovery are all assertable exactly
@@ -455,16 +455,28 @@ def test_beta_refinement_ac11_inapplicable_when_locked(smpl_model):
 
 
 # ---------------------------------------------------------------------------
-# AC13 — optimisation < 60s on GPU with a 50K cloud
+# Wall-clock pathology guard (AC13 retired — see below)
 # ---------------------------------------------------------------------------
 
 
 @requires_smpl
 @requires_fixture
 @pytest.mark.gpu
-def test_optimisation_under_60s(smpl_model):
+def test_optimisation_completes_without_pathological_slowdown(smpl_model):
+    """AC13's 60s budget was RETIRED. Tier 3 is a correctness-first proof of
+    concept and 90-120s would be perfectly acceptable for it; optimising against a
+    wall-clock target actively distorted the design, most visibly by tuning the
+    early-stopping tolerance for speed rather than for fit quality (see
+    `_CONVERGENCE_REL_TOL`) — a stopping rule chosen to save seconds truncated
+    stages at whatever iteration happened to be quiet.
+
+    What survives is a pathology guard: this must catch a regression that makes
+    the fit an order of magnitude slower (an accidental O(n^2), a loop that never
+    exits), not police a performance budget. Measured 29.4s at 50K points, so the
+    bound sits ~10x above and should never fire for an ordinary slowdown.
+    """
     if not torch.cuda.is_available():
-        pytest.skip("GPU required for the AC13 wall-clock measurement")
+        pytest.skip("GPU required for the wall-clock measurement")
 
     tier2 = _perturbed_tier2(smpl_model, seed=5)
     cfg = Tier3Config()  # literal defaults — target_points=50_000
@@ -484,11 +496,13 @@ def test_optimisation_under_60s(smpl_model):
     debug_dir = Path("output/debug/surface")
     debug_dir.mkdir(parents=True, exist_ok=True)
     with open(debug_dir / "summary.txt", "a") as f:
-        f.write(
-            f"\n\n=== AC13 wall clock ===\nS2+S3 at {aligned.n_points} points: {elapsed:.1f}s\n"
-        )
+        f.write(f"\n\n=== wall clock ===\nS2+S3 at {aligned.n_points} points: {elapsed:.1f}s\n")
 
-    assert elapsed < 60.0, f"S2+S3 took {elapsed:.1f}s (budget: 60s) at {aligned.n_points} points"
+    assert elapsed < 300.0, (
+        f"S2+S3 took {elapsed:.1f}s at {aligned.n_points} points — ~10x the measured "
+        f"29.4s baseline. This is a pathology guard, not a budget: something is "
+        f"algorithmically wrong, not merely slow."
+    )
 
 
 # ---------------------------------------------------------------------------

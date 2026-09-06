@@ -73,27 +73,29 @@ _PARAM_NAMES: tuple[str, ...] = (
     "displacements",
 )
 
-#: Review iteration 2, AC13 finding: an ABSOLUTE tolerance (the original 1e-7,
-#: mirrored unchanged from Tier 2's pixel-scale loss) is miscalibrated for Tier 3's
-#: metres-scale loss — it can fire almost immediately when a stage's loss happens to
-#: start small (a few iterations in, on a near-converged initial fit), or effectively
-#: never when a stage's loss is genuinely non-convergent at any scale (S3's
-#: `w_normal` term, documented in `surface_losses.py`). A RELATIVE tolerance —
-#: "did the loss move by less than 0.01% of its own current magnitude" — is scale-
-#: invariant, so the same constant means the same thing whether a stage's loss sits
-#: at 1e-2 or 1e-5. Chosen empirically by sweeping {1e-7, 1e-6, 1e-5, 1e-4, 1e-3}
-#: against the real AC13 fixture
-#: (`tests/integration/test_tier3_integration.py::test_optimisation_under_60s`,
-#: `Tier3Config()` literal defaults, 50K points, `_perturbed_tier2(seed=5)`): 1e-6
-#: and 1e-5 land right on the 60s edge (58-59s — too close to the observed 2-3x
-#: run-to-run wall-clock variance on this machine to ship), 1e-3 stays looser but
-#: paradoxically fails to let the displacement stage converge early at all (full
-#: 250/250) on this scenario, while 1e-4 is the only setting where BOTH stages
-#: exercise genuine early stopping (82/300 + 157/250 = 239/550, a materially larger
-#: fraction of the schedule than the old absolute tolerance's measured 162/550) at a
-#: comfortably-under-budget 40.2s. See this component's BUILD_RESULT notes for the
-#: full swept table.
+#: A RELATIVE tolerance — "did the loss move by less than 0.01% of its own current
+#: magnitude" — replacing the original ABSOLUTE 1e-7, which was mirrored unchanged
+#: from Tier 2's pixel-scale loss and is miscalibrated for Tier 3's metres-scale
+#: one: it fires almost immediately when a stage's loss happens to start small (a
+#: near-converged initial fit), and is meaningless when it starts large. Relative
+#: means the same thing whether a stage's loss sits at 1e-2 or 1e-5.
+#:
+#: Note this constant alone is NOT a convergence criterion — see
+#: `_CONVERGENCE_PATIENCE`. It was originally tuned against a wall-clock budget
+#: (AC13, since retired) rather than against fit quality, which is the wrong
+#: objective for a stopping rule; the patience requirement is what makes the pair
+#: mean "the loss has stopped moving" instead of "one step happened to be small".
 _CONVERGENCE_REL_TOL = 1e-4
+#: Consecutive iterations that must satisfy `_CONVERGENCE_REL_TOL` before a stage
+#: stops. Without this the test is single-iteration and fires on one noisy step:
+#: measured, the bare tolerance held on 159/299 S2 and 155/249 S3 iterations, i.e.
+#: over half of them, so it was not detecting convergence at all — it was sampling
+#: noise. The visible consequence was S3 truncating anywhere between iteration 20
+#: and 111 across inputs that differed by 1e-7 m, which is a fit whose length is
+#: decided by chance. 10 is deliberately conservative: stopping early is only ever
+#: an optimisation, and `best_params` means a stage that runs long cannot return a
+#: worse answer than one that stops.
+_CONVERGENCE_PATIENCE = 10
 #: Floor on the denominator of the relative-change ratio, so a stage whose loss
 #: happens to pass through ~0 (e.g. a perfect-fit synthetic scenario) does not divide
 #: by a near-zero number and report a spuriously huge relative change (which would
@@ -388,6 +390,9 @@ class Tier3SurfaceFitter:
             optimiser = torch.optim.Adam(params_to_opt, lr=stage.learning_rate)
             stage_history: list[float] = []
             prev_loss = float("inf")
+            best_loss = float("inf")
+            best_params: list[torch.Tensor] | None = None
+            n_quiet = 0  # consecutive iterations satisfying the convergence test
 
             for it in range(stage.n_iterations):
                 optimiser.zero_grad()
@@ -442,31 +447,70 @@ class Tier3SurfaceFitter:
                         self.smpl.displacements
                     )
 
+                loss_val = float(loss.item())
+                stage_history.append(loss_val)
+
+                # Track the best iterate, not just the last. Adam on this objective
+                # is not monotone — the final iterate is routinely worse than one
+                # seen earlier — so returning "wherever the loop happened to stop"
+                # throws away a strictly better answer we already had.
+                #
+                # This MUST snapshot before `optimiser.step()`: `loss` was evaluated
+                # at the CURRENT parameters, so snapshotting after the step would
+                # pair this loss value with the next iterate's parameters. That
+                # off-by-one-step pairing is silent at a sane learning rate and
+                # catastrophic at a large one (measured: it returned a fit 777mm
+                # from the target while correctly reporting the best loss).
+                if loss_val < best_loss:
+                    best_loss = loss_val
+                    best_params = [p.detach().clone() for p in params_to_opt]
+
                 loss.backward()
                 optimiser.step()
 
-                loss_val = float(loss.item())
-                stage_history.append(loss_val)
-                # Relative, not absolute (AC13 finding) — scale-invariant across a
+                # Relative, not absolute — scale-invariant across a
                 # stage whose loss might sit anywhere from ~1e-2 (S3 at a poor S2
                 # handoff) to ~1e-5 (a near-converged fit); see the constants'
                 # docstrings above.
+                #
+                # Requiring _CONVERGENCE_PATIENCE CONSECUTIVE quiet iterations is
+                # the other half: a single-iteration test fires on one noisy step,
+                # and this loss is noisy enough that it was satisfied on 159/299 S2
+                # and 155/249 S3 iterations — so where a stage stopped was decided
+                # by whichever step happened to be small, not by convergence. The
+                # observable symptom was S3 truncating anywhere from iteration 20
+                # to 111 across inputs differing by 1e-7 m.
                 denom = max(abs(prev_loss), _CONVERGENCE_LOSS_EPS)
-                if (
-                    abs(prev_loss - loss_val) < _CONVERGENCE_REL_TOL * denom
-                    and it > _CONVERGENCE_MIN_ITERS
-                ):
-                    logger.debug("Stage %r converged at iter %d", stage.name, it)
+                if abs(prev_loss - loss_val) < _CONVERGENCE_REL_TOL * denom:
+                    n_quiet += 1
+                else:
+                    n_quiet = 0
+                if n_quiet >= _CONVERGENCE_PATIENCE and it > _CONVERGENCE_MIN_ITERS:
+                    logger.debug(
+                        "Stage %r converged at iter %d (%d consecutive quiet iterations)",
+                        stage.name,
+                        it,
+                        n_quiet,
+                    )
                     break
                 prev_loss = loss_val
 
+            # Restore the best iterate. `copy_` under no_grad keeps each leaf's
+            # identity, so the Parameter objects the caller (and any later stage)
+            # holds references to are the ones that get updated.
+            if best_params is not None and best_loss < stage_history[-1]:
+                with torch.no_grad():
+                    for param, best in zip(params_to_opt, best_params, strict=True):
+                        param.copy_(best)
+
             loss_history[stage.name] = stage_history
             logger.info(
-                "Stage %r done (%d iters): loss %.6f -> %.6f",
+                "Stage %r done (%d iters): loss %.6f -> %.6f (best %.6f)",
                 stage.name,
                 len(stage_history),
                 stage_history[0] if stage_history else 0.0,
                 stage_history[-1] if stage_history else 0.0,
+                best_loss,
             )
 
         # Courtesy: leave every parameter trainable again for any caller that

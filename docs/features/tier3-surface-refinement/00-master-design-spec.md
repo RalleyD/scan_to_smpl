@@ -851,9 +851,15 @@ needed — consistent with the `selfcal-default-extrinsics` precedent.
   criterion that the shipped weights are wrong if they wrinkle the mesh, so a version that
   overrides any weight does not discharge it. Measured 117 → 115 faces against the bound of 122,
   and max per-joint change 9.07°, against 117 → 1262 for the pre-A1 weights.
-- **AC13** (7.7) — Optimisation < 60 s on GPU with a 50 K cloud. **Evidence**: fixture integration
-  test records wall-clock for S2+S3 in `summary.txt`; asserted `< 60.0` when CUDA is available.
-  (Measured budget: 74 ms/iter × 550 iters ≈ 41 s.)
+- **AC13** (7.7) — ~~Optimisation < 60 s on GPU with a 50 K cloud.~~ **RETIRED.** Tier 3 is a
+  correctness-first proof of concept, where 90–120 s is perfectly acceptable; there is no user-facing
+  latency requirement to defend. Keeping it did active harm: it made wall-clock the objective for
+  decisions that should have been made on fit quality, most visibly the early-stopping tolerance
+  (`_CONVERGENCE_REL_TOL`), which was swept against this 60 s budget and so selected a value that
+  truncated stages at whatever iteration happened to be quiet. Performance work belongs after the
+  fit is right, and should be measured then. The wall-clock number is still recorded in
+  `summary.txt`, and a pathology guard (~10× the measured 29.4 s) still catches an accidental
+  O(n²) or a non-terminating loop — but nothing asserts a budget.
 
 ### PSD boundary (7.B1–7.B8 — contract requirements, each fails loudly)
 
