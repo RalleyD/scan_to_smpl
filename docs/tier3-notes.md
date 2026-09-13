@@ -158,10 +158,26 @@ The obvious idea: the mesh surface should face the same way as the scan surface,
 
 It wrecks the mesh. Measured: **117 → 1262 self-intersecting faces.**
 
-The reason is instructive. A vertex normal is computed from its *neighbouring faces*, so a gradient
-that flows through the normal pulls each vertex independently, with no term coupling it to its
-neighbours. The optimiser discovers it can improve every vertex's normal alignment by making the
-surface locally crinkly. It is a wrinkle-generating objective wearing a smoothness costume.
+The reason is worth getting precisely right, because the obvious explanation is slightly wrong.
+A vertex normal *is* computed from its neighbouring faces, so the gradient does touch neighbours —
+there is coupling. The problem is that the coupling is **competitive rather than smoothing**, for
+three compounding reasons:
+
+1. **The target field is itself noisy.** Cloud normals are estimated by k-NN PCA on a noisy
+   photogrammetry cloud, and deliberately *not* made orientation-consistent (which is why the loss
+   uses `|cos|` at all). So the mesh is being asked to match a high-frequency noise field.
+2. **A normal is a derivative, not a position.** The loss constrains which way a surface patch
+   *faces*, not where it *is*. That leaves a large null space, and a vertex can improve its own
+   normal by moving perpendicular to the surface — tilting its adjacent faces rather than moving
+   toward the scan.
+3. **Adjacent vertices share faces, and want to tilt them differently.** Vertex A's target normal
+   comes from one cloud point, vertex B's from another, each independently noisy. Satisfying both
+   approximately means displacing A and B in *opposite* directions perpendicular to the surface.
+   That is a ripple.
+
+Nothing in the term penalises high spatial frequency — that is exactly Laplacian smoothing's job,
+and the normal term was weighted 10× *above* it. It is a wrinkle-generating objective wearing a
+smoothness costume.
 
 The reference implementation this project cites (DavidBoja/SMPL-Fitting) uses normals **only as a
 correspondence filter**: reject point pairs whose normals disagree by more than N degrees, then
@@ -235,6 +251,20 @@ manifest.json         locates every pose by name
 D  :=  V_final  −  SMPL(β, θ, t, s)          in the POSED WORLD frame, metres
 ```
 
+**Read that baseline carefully.** `SMPL(β, θ, t, s)` is the *full* forward pass — template, shape
+blendshapes, **pose blendshapes**, then LBS. So D is **not** "the correction LBS needs". SMPL
+already applies its own pose-corrective layer (§1, step 3), learned from population data.
+
+D is what is left *after* that. Which means it is:
+
+- clothing and hair,
+- **this subject's** soft-tissue behaviour, where they deviate from the population average SMPL was
+  trained on,
+- anything nonlinear in pose that SMPL's *linear* pose blendshapes structurally cannot represent.
+
+If you model δ as "the LBS artifact correction", you will be re-learning something SMPL does for you
+— see [`psd-primer.md`](psd-primer.md) §2.
+
 ---
 
 ## 7. How this enables PSD
@@ -302,10 +332,48 @@ and each one prevents a specific way of poisoning the training signal:
 
 That third row is worth dwelling on. A Meshroom cloud arrives in an arbitrary frame every single
 run. If any part of the pipeline depended on that frame, D would encode the *scanner's* accidental
-coordinate system, and PSD would learn a pose→deformation mapping contaminated by it. This is why
-AC18 checks that D comes out **bitwise identical** when the same cloud is fed in under a different
-similarity transform, and why the preprocessing decimation had to be rewritten to select points by
-index rather than by a spatial voxel grid.
+coordinate system, and PSD would learn a pose→deformation mapping contaminated by it.
+
+### "Bitwise identical", precisely
+
+AC18 feeds the *same* cloud through twice, the second time pre-multiplied by a different similarity
+(scale 4.2, a 63° rotation, an offset), and requires D to come out identical. Not "within
+tolerance" — **every one of the 20,670 float32 values equal, bit for bit**:
+
+```
+aligned cloud points bitwise equal : False        ← differ by 3.3e-14 m
+D bitwise equal (np.array_equal)   : True         ← 0 / 20670 elements differ
+```
+
+The aligned clouds are *not* bitwise equal, and that is the honest mechanism. Doing the rotation and
+scaling arithmetic in a different order leaves ~3.3e-14 m of float64 round-off. But the optimiser
+works in **float32**, whose resolution at metre scale is ~1.2e-7 — seven orders of magnitude
+coarser. Once cast, the two runs are looking at *literally the same numbers*, so they produce
+literally the same output.
+
+This is why bitwise is a stronger claim than a tolerance, and why it was worth insisting on. A
+tolerance invites a systematic leak to hide underneath it: D differing by 0.4mm under a 0.5mm bound
+would pass while being genuinely frame-dependent. Bitwise equality is structural — it says the
+computation *did not depend on the frame at all*, to below working precision. If that residual were
+1e-6 instead of 1e-14, D would not be bitwise identical, and that would be the signal of a real leak.
+
+### "Decimation", and why the voxel grid was wrong
+
+**Decimation** is just thinning: a Meshroom cloud arrives with ~60,000+ points and the fit uses
+50,000, so something has to choose which to drop. Two ways:
+
+| | How it picks | Frame-dependent? |
+|---|---|---|
+| **Voxel grid** (was) | Chop space into cubes, keep one point per cube | **Yes** — the grid is laid out in the cloud's *current* coordinates |
+| **Index selection** (now) | Keep every *n*-th point by position in the array | No — depends only on the point count |
+
+The voxel grid broke frame-independence twice over: the cube size was derived from the cloud's
+*axis-aligned* bounding box (which changes when you rotate the cloud), and even at a fixed cube size
+the grid itself sits in the current frame, so rotating the cloud shuffles which points fall in which
+cube. Measured: 4429 vs 4469 surviving points for the same cloud under a rigid rotation — and that
+40-point difference propagated all the way to a 1.96mm spread in D.
+
+Index selection asks only "how many points are there?", which no rotation can change.
 
 ### Current state
 
