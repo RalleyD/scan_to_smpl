@@ -1,8 +1,9 @@
 # PSD primer — what δ is, before you build it
 
 Companion to [`tier3-notes.md`](tier3-notes.md). The binding spec is
-[`psd_master_design_spec.md`](psd_master_design_spec.md); where this and the spec disagree the spec
-wins, **except §7**, where this corrects the spec's "thin" to "algebraically zero".
+[`psd_master_design_spec.md`](psd_master_design_spec.md) and it wins wherever this disagrees. The
+one place to read alongside it is §7: the *decision* there was settled on 2026-08-02 and is already
+in the spec (§4.4) — but §4.2's wording still understates why, and has not been updated.
 
 There is also a designed reading copy of this document published as an artifact. This file is the
 canonical text — if you change one, change both.
@@ -212,19 +213,44 @@ Two corpora, differing only in where ground-truth δ comes from:
 | **A** | `M_fit − SMPL(β, θ)` — the registered fits themselves | No |
 | **B** | `scan_surface(θ) − SMPL(β, θ)` — Tier 3 output | Yes |
 
-> ⚠️ **Read this before you write Stage A.**
+> **Settled 2026-08-02** — see [`psd_qa.md`](psd_qa.md) Q2, folded into spec §4.4 and §4.2, with
+> β-lock settled in Q4 → R2. This is a restatement, not a new decision.
 >
-> The spec calls Stage A's δ "geometrically thin". It is worse than thin — with β locked it is
-> **algebraically zero**.
+> Spec §4.2 calls Stage A's δ "geometrically thin", which reads as small-but-present. It is sharper
+> than that. Follow the algebra: `M_fit,i` *is* `SMPL(β, θ_i, t_i, s_i)` — a SMPL mesh, produced by
+> SMPL, from those exact parameters. The baseline is `SMPL(β, θ_i)`. Same β (locked), same θ. The
+> difference is
 >
-> Follow it through. `M_fit,i` *is* `SMPL(β, θ_i, t_i, s_i)` — a SMPL mesh, produced by SMPL, from
-> those exact parameters. The baseline is `SMPL(β, θ_i)`. Same β (locked), same θ. Compare them in
-> a common frame with t and s removed and the difference is not small, it is **exactly zero,
-> everywhere**.
+> ```
+> δ_v = (s − 1)·p_v + t
+> ```
 >
-> There is no per-vertex signal, because subtracting a function from itself yields nothing. The only
-> way to make Stage A's δ non-zero is to *unlock* β — and then δ is pure shape-fitting drift, noise
-> you would be training a pose-dependent model on. Strictly worse than zero.
+> — a **global similarity with 4 degrees of freedom, not a per-vertex displacement field**.
+> Canonicalise the frames (remove t and s, which is what "in the same canonical frame" means) and
+> **δ ≡ 0 exactly, everywhere**.
+>
+> Stage A has no trainable target. The only way to make δ non-zero is to *unlock* β and train on
+> estimation drift — which is noise, not anatomy: low-rank, global rather than joint-local, and
+> correlated with per-pose image quality. Rejected; keep the R2 β-lock.
+
+### Use it as a self-test
+
+A zero target sounds useless, but it converts Stage A into something genuinely valuable: **a
+known-answer test for the hardest part of the pipeline.**
+
+δ ≡ 0 is what *correct* looks like. So if your Stage A δ comes out non-zero, you have a bug, and the
+value tells you which one:
+
+| Symptom | Likely cause |
+|---|---|
+| δ is a smooth global gradient across the body | `t`/`s` leaking into the baseline — frames not canonicalised |
+| δ varies pose to pose, largest where the fit was worst | β is not actually locked |
+| δ is joint-local and grows with joint angle | `R_v(θ)⁻¹` is wrong — probably the orthonormalisation of §3 |
+
+That last row is spec **R5**, the decisive unit test for the local-frame rotation, run at corpus
+scale rather than on one synthetic case. You need a synthetic known-answer δ anyway to test
+`R_v(θ)⁻¹`, because no *real* δ has a known correct value — Stage A gives you one for free across
+every pose you have.
 
 **So: build Stage A's code, and do not chase its numbers.** It is the same code Stage B runs — only
 the ground-truth source swaps — so it is genuinely worth writing early. Its job is to prove the
