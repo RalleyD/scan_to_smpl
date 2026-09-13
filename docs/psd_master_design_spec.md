@@ -138,14 +138,35 @@ Mapping that onto SMPL for **Stage A**:
    Storing `δ` in the local frame is what makes it pose-*invariant* to rigid articulation and is the
    entire reason PSD interpolates cleanly (paper §4).
 
-> **Honest caveat baked into the design:** In Stage A, `M_fit,i` *is* a SMPL mesh, so
-> `δ_i = M_fit,i − SMPL(β,θ_i)` is small — it captures only the difference between the *fitted*
-> params and the *pose-only* baseline (e.g. shape/scale/translation coupling, optimiser residuals),
-> **not** real off-manifold soft tissue. Stage A therefore proves the *machinery* (frames, interp,
-> export, smooth animation) and delivers a working rig, but its `δ` is geometrically thin. **This is
-> expected and is exactly why Stage B exists.** Stage B's `δ = scan_surface(θ) − SMPL(β,θ)` is
-> off-manifold and carries the real anatomy. The MVP's honesty depends on *reporting* this, not
-> hiding it behind good-looking interpolation.
+> **Stage A has no trainable target — `δ ≡ 0`.** *(Corrected 2026-08-02; this paragraph previously
+> said `δ` was "geometrically thin", i.e. small-but-present. It is not present at all. The
+> sequencing decision in §4.4 is unchanged — this only sharpens why.)*
+>
+> `M_fit,i` is not merely *a* SMPL mesh; it **is** `SMPL(β, θ_i, t_i, s_i)` — Tier 2 optimises the
+> parameters, and the mesh is that function evaluated at them. There is no fitting residual between
+> a mesh and the function that produced it. So against the baseline `SMPL(β, θ_i)`, with β locked
+> (R2) and θ shared, the difference is exactly
+>
+> ```
+> δ_v = (s − 1)·p_v + t
+> ```
+>
+> — a **global similarity with 4 degrees of freedom, not a per-vertex displacement field.**
+> Canonicalise the frames, as step 2 above requires ("in the *same* canonical frame"), and
+> **`δ ≡ 0` exactly, at every vertex, in every pose.**
+>
+> The only way to make it non-zero is to *unlock* β, and then `δ` is estimation drift: low-rank,
+> global rather than joint-local, and correlated with per-pose image quality. That is noise, not
+> anatomy, and training a pose-conditioned model on it is strictly worse than training on nothing.
+> **Keep the R2 β-lock.**
+>
+> **This does not weaken Stage A's role — it clarifies it.** Stage A proves the *machinery* (frames,
+> interpolation, export, smooth animation) and delivers a working rig. It simply cannot produce a
+> geometric *result*, so no Stage-A model claim or interpolation metric is meaningful. See §9 for how
+> the zero is used as a known-answer test instead, and AC2/AC3 for what replaces the vacuous checks.
+>
+> **This is exactly why Stage B exists.** Stage B's `δ = scan_surface(θ) − SMPL(β,θ)` is off-manifold
+> and carries the real anatomy.
 
 For **Stage B**, step 1 is replaced by the Tier-3 SMPL+D fit (mesh with per-vertex displacement
 against the point cloud); everything else — local-frame rotation, interpolation, export — is
@@ -189,9 +210,12 @@ not on PSD code. The blocker for good numbers is upstream of the model. Build or
    at all and `N ≈ 7–10` to be useful. Today `N = 1` (t-pose only). No amount of PSD work substitutes
    for this.
 2. **Tier 3 (point cloud → SMPL+D)** — the groundwork that makes the residual `δ` *geometrically real*.
-   Prioritise this over polishing Stage A, because Stage A's `δ` is thin by construction (§4.2) and
-   only Tier 3 supplies the off-manifold soft-tissue signal that gives PSD a defensible result.
-3. **Stage A becomes a cheap baseline to benchmark against**, not the end product.
+   Prioritise this over polishing Stage A, because Stage A's `δ` is identically zero by construction
+   (§4.2) — there is nothing there to polish — and only Tier 3 supplies the off-manifold soft-tissue
+   signal that gives PSD a defensible result.
+3. **Stage A becomes the machinery harness and the zero-baseline**, not a baseline model and not the
+   end product. "Benchmark against Stage A" means "against no correction at all", which is still a
+   meaningful comparison for Stage B to make — it is just not a *model* comparison.
 
 Practical implication: **build Stage A's *code* early** (it is the same code Stage B runs — only the
 GT source swaps), but **do not invest in making Stage A's *numbers* look good.** Spend that effort on
@@ -324,21 +348,35 @@ seam makes them interchangeable.
 
 Adapted from the attached plan's "three-way comparison" but corrected for **our** ground-truth reality.
 
-**Stage A** (no independent geometry — be honest about it):
-- **Reconstruction on train poses:** RBF is exact → ≈0; report as a *sanity check only*, not a result.
-- **Interpolation on held-out poses:** predict `δ` at a held-out pose's `θ`, compare to that pose's
-  *own* registered `δ`. Metric: mean per-vertex error (mm). This is the real Stage-A number.
+**Stage A** (no independent geometry, and no residual either — see §4.2):
+
+- **Synthetic known-answer recovery** — *the* Stage-A metric (AC2). Inject a known `δ`, run the full
+  path, recover it. This is the only Stage-A number that measures anything, and it is what validates
+  `R_v(θ)⁻¹` (R5) at the same time.
+- **Real-corpus residual is ≈ 0** (AC3) — a diagnostic. `δ ≡ 0` is what *correct* looks like, so a
+  non-zero value is a bug, and its structure names the cause:
+
+  | Symptom | Cause |
+  |---|---|
+  | Smooth global gradient across the body | `t`/`s` leaking into the baseline — frames not canonicalised (§4.2 step 2) |
+  | Varies pose to pose, largest where the fit was worst | β not actually locked (R2) |
+  | Joint-local, growing with joint angle | `R_v(θ)⁻¹` wrong — this is R5, at corpus scale |
+
 - **Smoothness:** second-derivative (acceleration) of the vertex path across an interpolation sweep
-  (paper's concern about piecewise-linear SI). Lower = smoother.
+  of the *synthetic* corpus (paper's concern about piecewise-linear SI). Lower = smoother.
+- ⚠️ **No reconstruction or interpolation metric on the real corpus.** Both are structurally 0.000 —
+  reconstruction because RBF interpolates exactly, interpolation because interpolating between zeros
+  is zero. Reporting either invites reading a perfect-looking score as a result.
 - ⚠️ **No point-cloud metric in Stage A** — the attached plan's "PSD Chamfer vs point cloud" is a
   **Stage B** metric. Reporting it in Stage A would be measuring against geometry the model never saw
   and can't have learned; excluded by design.
 
 **Stage B** (point cloud is genuine independent geometry):
-- **Chamfer vs point cloud** for both the Stage-A and Stage-B predictions at held-out poses → the
-  headline benchmark: *how much closer to real geometry does scan-supervised δ get us?*
-- **Per-vertex δ magnitude comparison A vs B** → quantifies how thin the MVP residual was (validates
-  the §4.2 caveat with a number).
+- **Chamfer vs point cloud** at held-out poses, for Stage B against the **uncorrected baseline**
+  (`SMPL(β,θ)` with `δ = 0`, which is what Stage A amounts to) → the headline benchmark: *how much
+  closer to real geometry does scan-supervised δ get us?*
+- **Per-vertex δ magnitude, Stage B** → states in millimetres how much signal Stage B found where
+  Stage A had exactly none, which is what puts a number on the §4.2 caveat.
 
 **The circularity guard (carried from the codebase's existing rigour):** Stage A's validation is
 *internal consistency* only (as with the self-cal reprojection metric — see `notes.md` Phase 5). It
@@ -375,10 +413,23 @@ must state this explicitly so Stage-A numbers are never over-claimed.
 
 - **AC1** — `build_corpus` assembles the t-pose (and any further poses) into a `PSDCorpus` with shared
   `β` asserted. **Evidence:** `corpus.json` exists, `betas` identical across samples within tol.
-- **AC2** — RBF-PSD reproduces every *training* pose's `δ` to <1 mm mean per-vertex (exactness check).
-  **Evidence:** `eval_stageA.json.recon_mm < 1.0`.
-- **AC3** — On a held-out interpolation pose, Stage-A mean per-vertex `δ` error is reported (no
-  threshold gate at MVP — it's a baseline number). **Evidence:** `eval_stageA.json.interp_mm` present.
+- **AC2** — The corpus → residual → RBF → export path recovers a **synthetic known-answer `δ`** to
+  <1 mm mean per-vertex. Inject a known displacement field into the corpus (e.g. a fixed offset along
+  vertex normals on one body part, varying with a chosen joint angle), run the full path, and compare
+  the recovered `δ` to the injected one. **Evidence:** `eval_stageA.json.synthetic_recovery_mm < 1.0`.
+
+  *Rewritten 2026-08-02.* The previous form — "reproduces every training pose's `δ` to <1 mm" — was
+  vacuous twice over: `δ ≡ 0` on the real corpus (§4.2), so predicting zero passes it, and RBF
+  interpolates its training points exactly by construction, so it passes for any implementation that
+  runs at all. A synthetic target is the only way to test this path, and it is needed for R5
+  regardless, since no *real* `δ` has a known correct value.
+
+- **AC3** — On the **real** corpus, Stage-A `δ` is **≈ 0 at every vertex** (`< 0.01 mm`), confirming
+  β-lock and frame canonicalisation. **Evidence:** `eval_stageA.json.residual_max_mm < 0.01`.
+
+  This is a diagnostic, not a performance number, and it fails *upward*: a **non-zero** result means
+  a bug, and its structure identifies which (§9). No Stage-A interpolation-accuracy metric is
+  reported, because interpolating between zeros is zero and the figure would be meaningless.
 - **AC4** — Blend-shape export loads in Maya without error and animates smoothly. **Evidence:**
   `blendshapes_stageA.npz` passes the export validator; manual Maya import checklist.
 - **AC5** (Stage B) — Benchmark report quantifies Stage-B Chamfer improvement over Stage-A at
@@ -397,8 +448,13 @@ must state this explicitly so Stage-A numbers are never over-claimed.
   **Recommended (not optional):** fit the reference pose first, freeze its `β`, and re-fit every other
   pose with `β` non-trainable (optimise only `θ`, translation, scale) — a small Tier-2 optimiser flag.
   `build_corpus` asserts shared `β` across samples regardless.
-- **R3 — Stage-A residual is geometrically thin (the §4.2 caveat).** Risk of over-claiming a
-  good-looking-but-empty MVP. *Mitigation:* eval report states it in words *and* Stage B quantifies it.
+- **R3 — Stage-A residual is identically zero (the §4.2 caveat).** Risk of building a model on an
+  empty target and reporting interpolation numbers that describe nothing. Note the earlier framing —
+  "thin" — understated this: reporting it in words is *not* sufficient mitigation for a metric that
+  is structurally 0.000 and will look like a perfect score to anyone skim-reading the eval JSON.
+  *Mitigation:* Stage A ships **no** model claim and **no** δ-accuracy metric (AC2/AC3 rewritten
+  accordingly); the machinery is validated against a **synthetic known-answer δ** instead, and the
+  real-corpus zero is used as a diagnostic (§9).
 - **R4 — Axis-angle pose space aliases.** Naïve `θ` interpolation produces artefacts.
   *Mitigation:* rotation-matrix / per-active-joint pose-space encoding (§4.3); start 1-D per joint.
 - **R5 — Local-frame rotation bug.** Getting `R_v(θ)` wrong silently produces plausible-but-wrong δ.
