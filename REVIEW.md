@@ -4,7 +4,12 @@
 
 Phased implementation plan with explicit gating criteria. Reflects the three-tier
 calibration-free architecture using CameraHMR (Tier 1), PnP self-calibration (Tier 2),
-and Kaolin-based chamfer fitting (Tier 3).
+and chamfer-based surface fitting (Tier 3).
+
+> **This is the original plan, not a status report.** It has drifted from what shipped in places,
+> and struck-through items mark where. For current Tier 3 state read `docs/tier3-notes.md`
+> (concepts) and `docs/features/tier3-surface-refinement/LOOP-STATE.md` (what is actually
+> discharged). Phase 7's downstream boundary table (7.B1–7.B8) is still binding and accurate.
 
 **Gate Rule**: ALL acceptance criteria must pass before proceeding. If a gate fails,
 diagnose using the troubleshooting notes before revisiting architecture.
@@ -20,14 +25,15 @@ You can deliver Tier 1 while still building Tier 2+3.
 Project structure, dependencies, SMPL forward pass verified on GPU.
 
 ### Deliverables
-- [x] `pyproject.toml` with all dependencies (torch, smplx, kaolin, transformers, opencv, open3d, click)
+- [x] `pyproject.toml` with all dependencies (torch, smplx, transformers, opencv, open3d, click).
+      `kaolin` remains an unused optional extra.
 - [x] Package structure per CLAUDE.md
 - [x] `scantosmpl/smpl/model.py` — SMPL/SMPL-X wrapper with differentiable forward pass
 - [x] `scantosmpl/config.py` — Dataclass config
 - [x] `scantosmpl/types.py` — ViewType, FittingResult, CameraParams
 - [x] `tests/test_smpl_model.py`
 - [x] `data/body_models/README.md` — download instructions for SMPL .pkl files
-- [x] Verify Kaolin installs cleanly: `from kaolin.metrics.pointcloud import chamfer_distance`
+- [x] ~~Verify Kaolin installs cleanly~~ — **Kaolin not adopted** (no wheel for torch 2.11+; see CLAUDE.md D2 note)
 
 ### Acceptance Criteria
 
@@ -37,7 +43,7 @@ Project structure, dependencies, SMPL forward pass verified on GPU.
 | 0.2 | SMPL forward: 6890 verts, 13776 faces, 24 joints | Assert shapes |
 | 0.3 | Differentiable: `loss.backward()` flows grads through β and θ | `.grad is not None` |
 | 0.4 | Forward < 50ms on GPU | Timing |
-| 0.5 | Kaolin chamfer_distance works on two random point clouds | Smoke test |
+| ~~0.5~~ | ~~Kaolin chamfer_distance works~~ — superseded: chunked `torch.cdist` (loss) + Open3D raycasting (metric) | Smoke test |
 | 0.6 | Joint regressor: shoulder width 35-45cm at neutral pose | Measurement |
 
 ---
@@ -239,15 +245,20 @@ has correct metric scale and orientation — it's the alignment target.
 ## Phase 7: Surface Refinement — Tier 3 Complete (3 days)
 
 ### Objective
-Refine SMPL β and θ using Kaolin chamfer distance with semantic body-part weighting.
+Refine SMPL β and θ using chamfer distance with semantic body-part weighting.
 Optionally compute SMPL+D per-vertex displacements.
 
 ### Deliverables
-- [ ] `scantosmpl/fitting/surface.py` — Kaolin chamfer + semantic weighting
-- [ ] SMPL+D support in `model.py` (per-vertex displacement field)
-- [ ] Additional losses: normal consistency, Laplacian smoothing
-- [ ] `tests/test_surface_fitting.py`
-- [ ] Viz: SMPL mesh overlaid on point cloud, before/after refinement
+- [x] `scantosmpl/fitting/surface.py` — chunked `torch.cdist` chamfer + semantic weighting
+      (**not Kaolin** — see the D2 note in CLAUDE.md)
+- [x] SMPL+D support in `model.py` (per-vertex displacement field)
+- [x] Additional losses: Laplacian smoothing (`w=3.0`), `‖D‖²` (`w=0.01`).
+      **Normal consistency is implemented but ships at `w=0.0`** — it minimises `1−|cos|` directly,
+      so its gradient flows through each vertex's own normal and wrinkles the mesh (measured
+      117 → 1262 self-intersecting faces). Smoothness does the anti-wrinkling job instead.
+      Rationale in `docs/tier3-notes.md` §4.
+- [x] `tests/test_surface_fitting.py`
+- [x] Viz: SMPL mesh overlaid on point cloud, before/after refinement
 
 ### Acceptance Criteria
 
@@ -259,7 +270,14 @@ Optionally compute SMPL+D per-vertex displacements.
 | 7.4 | β refinement improves body proportions (shoulder width, waist) vs Tier 2 | Measure |
 | 7.5 | θ remains plausible; no self-intersections added | Visual + count |
 | 7.6 | SMPL+D captures clothing detail within 5mm (if enabled) | Displacement stats |
-| 7.7 | Optimisation < 60 seconds on GPU with 50K point cloud | Timing |
+| ~~7.7~~ | ~~Optimisation < 60 seconds on GPU with 50K point cloud~~ — **RETIRED** | — |
+
+> **7.7 retired.** Tier 3 is correctness-first with no user-facing latency requirement, and keeping
+> the budget did active harm: it made wall-clock the objective for decisions that belong to fit
+> quality. The early-stopping tolerance was literally swept against this 60 s figure, selecting a
+> value that truncated stages at whatever iteration happened to be quiet — fixed in the tier3
+> iteration-4 cycle. Wall-clock is still recorded (measured 29.4 s at 50 K points) and a ~10×
+> pathology guard still catches an accidental O(n²), but nothing asserts a budget.
 
 ### 📏 Metric Definition — "Chamfer" (binding for 7.1, 7.2, and the Tier 3 gate)
 
@@ -360,14 +378,14 @@ corrupts the PSD residual rather than failing loudly.
 
 | Phase | Days | Cumulative | Tier | Key Component |
 |-------|------|------------|------|---------------|
-| 0: Scaffolding | 1 | 1 | — | SMPL + Kaolin |
+| 0: Scaffolding | 1 | 1 | — | SMPL forward pass |
 | 1: Detection | 2 | 3 | — | ViTPose++ + RT-DETR |
 | 2: Per-View HMR | 2.5 | 5.5 | Tier 1 | CameraHMR |
 | **3: Consensus** ⚠️ | 2 | 7.5 | **Tier 1 ✓** | SO(3) fusion |
 | 4: Self-Calibration | 1.5 | 9 | Tier 2 | PnP (138 dense kps) |
 | **5: Triangulation** ⚠️ | 3 | 12 | **Tier 2 ✓** | DLT + SMPL optim |
 | 6: Point Cloud | 2 | 14 | Tier 3 | ICP to SMPL |
-| **7: Surface** ⚠️ | 3 | 17 | **Tier 3 ✓** | Kaolin chamfer |
+| **7: Surface** ⚠️ | 3 | 17 | **Tier 3 ✓** | chunked `torch.cdist` chamfer |
 | 8: Pipeline + CLI | 2 | 19 | — | End-to-end |
 | 9: Packaging | 1 | 20 | — | pip + CI |
 
@@ -381,7 +399,7 @@ corrupts the PSD residual rather than failing loudly.
 |----------|-----------|----------------------|
 | CameraHMR over HMR2.0 | Full perspective camera, FoV prediction, 138 dense keypoints. HMR2.0 unmaintained, detectron2 hell. | HMR2.0 (dead), TokenHMR (still needs detectron2) |
 | PromptHMR as fallback | No registration required, Google Drive weights, SOTA accuracy (36.6mm). | SMPLer-X (8.2GB model, overkill) |
-| Kaolin over PyTorch3D | pip-installable, PyTorch 2.1-2.8 support, Apache 2.0. PyTorch3D stuck at 2.4. | PyTorch3D (install hell), torch.cdist (slower) |
+| ~~Kaolin over PyTorch3D~~ → **neither; chunked `torch.cdist` + Open3D raycasting** | Kaolin's wheel index tops out at torch 2.8 and its wheels are ABI-pinned, so it fails at *import* on this project's torch 2.11–2.12. REVIEW 7.M6 already permits loss ≠ metric, and neither half needs a compiled extension. | Kaolin (ABI mismatch), PyTorch3D (install hell) |
 | 138 dense keypoints for PnP | Transformative for self-calibration robustness. 138 >> 12 sparse joints. | Sparse COCO joints only (fragile PnP) |
 | CameraHMR FoV over EXIF | 5-7° error, trained on 500K Flickr images. EXIF may be missing/wrong. | EXIF only (unreliable for some cameras) |
 | Align PC to SMPL, not reverse | SMPL has correct metric scale. PC from Meshroom has arbitrary scale. | Align SMPL to PC (inherits Meshroom issues) |

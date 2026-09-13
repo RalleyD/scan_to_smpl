@@ -123,12 +123,13 @@ INPUT: ~60 images (EXIF-normalised) + optional point cloud (PLY/OBJ)
 │                                                              │
 │  Step 3b: Differentiable surface fitting                     │
 │   Optimise SMPL params + optional per-vertex D               │
-│   Losses:                                                    │
-│     L_chamfer — semantic body-part weighted (Kaolin)         │
-│     L_joints  — from Tier 2, downweighted                   │
-│     L_normal  — surface normal consistency                   │
-│     L_smooth  — Laplacian regularisation on D                │
-│     L_prior   — pose/shape priors                            │
+│   Losses (AS SHIPPED — see docs/tier3-notes.md §4):          │
+│     L_chamfer — semantic body-part weighted (torch.cdist)    │
+│     L_smooth  — Laplacian regularisation on D (w=3.0)        │
+│     L_dispreg — ||D||^2 (w=0.01)                             │
+│     L_prior   — pose/shape priors (L2, not GMM)              │
+│     L_normal  — normal consistency: SHIPS OFF (w=0.0)        │
+│     L_joints  — from Tier 2: NOT implemented                 │
 │                                                              │
 │   Body-part weights:                                         │
 │     torso: 1.0, arms: 0.7, legs: 0.7,                       │
@@ -169,14 +170,20 @@ Errors don't cascade — each tier improves on the previous.
 | **Intrinsics** | CameraHMR HumanFoV (primary), EXIF (fallback) | FoV from HumanFoV has 5-7° error; EXIF FocalLengthIn35mmFilm as backup. |
 | **Triangulation** | Custom DLT + RANSAC | Confidence-weighted, outlier rejection. |
 | **Optimisation** | PyTorch Adam/L-BFGS | Differentiable with loss weight annealing. |
-| **Pose prior** | GMM from SMPLify (bundled) | VPoser as optional upgrade (requires separate download). |
+| **Pose prior** | ~~GMM from SMPLify~~ → **L2-toward-neutral** (as built) | Neither GMM nor VPoser is implemented; `fitting/losses.py::pose_prior_loss` is `(body_pose**2).mean()`. Weighted 0.01, so it does little work against the chamfer term. A real prior remains an available upgrade. |
 
 ### Tier 3: Surface Refinement
 
+> ⚠️ **Kaolin was NOT adopted.** NVIDIA's wheel index tops out at `torch-2.8.0_cu128`; this project
+> runs torch 2.11–2.12, and Kaolin wheels are compiled against a specific torch C++ ABI, so the 2.8
+> wheel fails at import rather than degrading. The resolution splits loss from metric (REVIEW 7.M6)
+> and neither half needs a compiled extension. See tier3 master spec **D2**.
+
 | Component | Choice | Why |
 |-----------|--------|-----|
-| **Chamfer distance** | **NVIDIA Kaolin** (`pip install kaolin`) | Apache 2.0. Pre-built wheels for PyTorch 2.1-2.8. GPU-optimised, differentiable. Includes `sided_distance`, `f_score`, `point_to_mesh_distance`. |
-| **Chamfer fallback** | `torch.cdist` (pure PyTorch) | Zero dependencies. Viable for prototyping. |
+| **Chamfer loss** (differentiable) | chunked `torch.cdist` | Bidirectional from one distance matrix — `min(dim=1)` is mesh→cloud, `min(dim=0)` is cloud→mesh, free. 6890×50K fwd+bwd in ~74ms. |
+| **Chamfer metric** (reporting) | `open3d.t.geometry.RaycastingScene.compute_distance` | True point-to-**surface**, which REVIEW 7.M1 requires — a vertex-based measure has a ~5.8mm tessellation floor. |
+| ~~NVIDIA Kaolin~~ | not installed | See the note above. `pyproject.toml`'s optional `kaolin` extra is left untouched and unused. |
 | **Reference impl** | **DavidBoja/SMPL-Fitting** patterns | Chamfer + landmark + regularisation. Docker container. Plotly viz. |
 | **Point cloud I/O** | Open3D ≥ 0.17 + trimesh | Load, denoise, downsample, ICP. |
 
@@ -193,7 +200,7 @@ Errors don't cascade — each tier improves on the previous.
 | Tool | Why Avoided |
 |------|-------------|
 | **HMR2.0 / 4DHumans** | Unmaintained. detectron2 build failures on PyTorch 2.0+. GPU memory leak. |
-| **PyTorch3D** | Last release Sep 2024. No support for PyTorch 2.5+. Install hell. Use Kaolin instead. |
+| **PyTorch3D** | Last release Sep 2024. No support for PyTorch 2.5+. Install hell. |
 | **MUC** | Pinned to PyTorch 1.12 + deprecated mmcv-full. Fails on modern GPUs. |
 | **detectron2** | No pre-built wheels for PyTorch 2.0+. Source build requires exact CUDA matching. |
 | **HeatFormer** | Requires pre-calibrated cameras. Not suitable for our calibration-free design. |
@@ -254,7 +261,7 @@ scantosmpl/
 │
 ├── fitting/
 │   ├── coarse.py             # Tier 2d: staged SMPL optimisation
-│   ├── surface.py            # Tier 3: chamfer + semantic weighting (Kaolin)
+│   ├── surface.py            # Tier 3: chamfer + semantic weighting (torch.cdist)
 │   ├── reprojection.py       # Multi-view reprojection (all 60 views)
 │   ├── scheduler.py          # Loss weight annealing schedules
 │   └── pipeline.py           # End-to-end Tier 1→2→3 orchestrator
@@ -359,4 +366,4 @@ scantosmpl fit-images \
 | HSfM (Choi et al.) | CVPR 2025 Highlight | Future: single-model pipeline replacement |
 | SMPL-Fitting (Bojanić) | GitHub 2024 | Tier 3 optimisation patterns |
 | SMPL/SMPL-X (Loper/Pavlakos) | SIGGRAPH 2015 / CVPR 2019 | Body model |
-| Kaolin (NVIDIA) | — | Chamfer distance |
+| ~~Kaolin (NVIDIA)~~ | — | Not adopted — see the D2 note in the Tier 3 stack table |
