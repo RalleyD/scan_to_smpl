@@ -122,6 +122,49 @@ The attached plan does a cruder version of this (`confidence = 1/(1 + chamfer/5)
 
 It's optional and a refinement, not core — with only ~7 poses it's a minor effect. I flagged it mainly because the plumbing is already there for free.
 
+## 6. The held-out pose - what actually happens
+
+Pose the canonical mesh to θ_test, then add the correction.
+Order matters, as δ is stored in the rest frame:
+
+    ```
+    θ_test  →  x_test = R(θ_test) − I            encode
+            →  δ_pred = Σⱼ wⱼ · φ(‖x_test − xⱼ‖)        predict, in LOCAL rest frame
+            →  D_pred = R_v(θ_test) · δ_pred      rotate into the posed frame
+            →  mesh   = SMPL(β, θ_test) + D_pred
+    ```
+
+**What's measured:**
+
+δ-space - the mean per-vertex || δ_pred - δ_true || in mm.
+
+    ```
+    mesh_pred - mesh_true = R_v * (δ_pred - δ_true)
+    ```
+
+Where R_v is a rotation, the per-vertex error is the same
+number whether you measure it in δ_space or after re-posing.
+i.e. The mesh doesn't need re-posing to get it.
+
+Geometry-space - chamfer of that final mesh against the
+held-out pose's **point cloud**. 
+This is the only genuinely independent check. 
+And, it has to be three-way or it's uninterpretable:
+
+| Mesh      | Tells you         |
+|-----------|-------------------|
+| SMPL(Beta, Theta) with δ=0 | The floor - no PSD at all |
+| SMPL(Beta, Theta) + D_pred | PSD |
+| SMPL(Beta, Theta) + D_True | the oracle's ceiling - best PSD could do given tier 3's own accuracy |
+
+In order to do this, the held-out pose is fitted by Tier 3.
+We need the D_true for both the oracle and gamma comparison.
+
+But it's flagged `--oracle-only` so it can't leak into the training.
+This is applicable to stage B only. As the stage A test fixture is gamma_true 0.
+
+
+
 ---
 
 ## Changes folded into the spec ✓
