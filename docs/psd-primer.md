@@ -93,6 +93,12 @@ R_v(θ) = Σ_k  w_vk · R_k(θ)
 > Either invert it properly, or orthonormalise first via polar decomposition (the closest true
 > rotation, from SVD: `R = UΣVᵀ → UVᵀ`). **Pick one, write down which, use the same one in training
 > and export.** A mismatch produces a rig that looks right in the viewer and is wrong in Maya.
+>
+> **Decided: the true inverse.** Standard SMPL+D adds δ to the template *before* skinning, so the
+> consumer's matrix is forced to be the blended one — see
+> [`psd-implementation-plan.md` D1](psd-implementation-plan.md#d1--frame-conversion-uses-the-true-inverse-m_v-not-polar-r).
+> Note also that this doc calls the blended matrix `R_v`, which wrongly implies it is a rotation;
+> the plan calls it `M_v`.
 
 ---
 
@@ -154,9 +160,9 @@ matrix, so you factor one (N, N) matrix once and apply it to all vertices at onc
 
 ```python
 # N poses, 6890 vertices. N is ~5, so Phi is 5x5.
-Phi = np.exp(-cdist(X, X)**2 / (2 * sigma**2))   # (N, N)
-D   = deltas.reshape(N, -1)                      # (N, 6890*3)
-W   = np.linalg.solve(Phi, D)                    # (N, 6890*3)  <- one solve
+Phi   = np.exp(-cdist(X, X)**2 / (2 * sigma**2))   # (N, N)
+Delta = deltas.reshape(N, -1)                      # (N, 6890*3)  <- LOCAL-FRAME delta, NOT D
+W     = np.linalg.solve(Phi, Delta)                # (N, 6890*3)  <- one solve
 
 # predict at a new pose
 phi   = np.exp(-cdist(x_new[None], X)**2 / (2 * sigma**2))   # (1, N)
