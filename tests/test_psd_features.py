@@ -9,6 +9,7 @@ Reference: docs/psd-implementation-plan.md, docs/psd-primer.md §4.
 """
 
 import inspect
+import re
 
 import numpy as np
 import pytest
@@ -78,6 +79,31 @@ class TestContract:
 
         feats = pose_features(batch)
         assert feats.shape == (5, EXPECTED_FEATURE_DIM)
+
+    @pytest.mark.parametrize(
+        "bad_shape",
+        [
+            (72,),  # global_orient + body_pose concatenated: the D2 leak, as a shape
+            (66,),  # one joint short
+            (5, 72),  # same leak, batched
+            (23, 3),  # right numbers, wrong layout: trailing axis must be the 69
+        ],
+    )
+    def test_rejects_anything_but_69_on_the_last_axis(self, bad_shape):
+        """D2 enforced by the shape, not just the signature.
+
+        `reshape(-1, 3)` accepts any multiple of 3, so a (72,) input — the most
+        likely real mistake, concatenating global_orient onto body_pose — would
+        silently become 24 "joints" and a 216-D feature. Nothing downstream
+        would complain until Phi quietly started depending on facing direction.
+        Fail at the boundary, loudly, with a ValueError.
+
+        The message must name the shape it actually received: when this fires
+        during corpus assembly (S3), that shape is the only clue to which
+        upstream step concatenated or truncated the pose.
+        """
+        with pytest.raises(ValueError, match=re.escape(str(bad_shape))):
+            pose_features(np.zeros(bad_shape))
 
     def test_batched_rows_match_individual_calls(self):
         """A batch must be exactly a stack of singles — no broadcasting surprises."""

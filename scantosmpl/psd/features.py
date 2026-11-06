@@ -41,40 +41,55 @@ particular work out, from the assertions:
 """
 
 import numpy as np
+
 from scantosmpl.utils.geometry import aa_to_rotmat
 
+# SMPL body_pose is 23 joints x 3 axis-angle numbers. global_orient is a SEPARATE (3,).
+N_JOINT_AXIS = 3
+N_BODY_JOINTS = 23
+BODY_POSE_DIM = N_BODY_JOINTS * N_JOINT_AXIS  # 69
+N_FEATURE_DIM = BODY_POSE_DIM * 3  # 207
 
-def pose_features(poses: np.ndarray[tuple[int, int], np.float64]):
+
+def pose_features(poses: np.ndarray[tuple[int, int] | tuple[int], np.float64]):
     """Pose -> interpolation coordinate.
 
-    TODO(S1): document and implement.
     Encodes the pose-feature to a 207-dimension space.
 
+    Needed for RBF kernel:
+    Without duplicates (single-valued), the same pose means the same features.
+    I.e. the same pose rotated 2*Pi isn't encoded as a different pose.
+    Continuous, leveraging rotation matrices (R), nearby poses represent reliably
+    as nearby features i.e. No canonicalisation to break this seam.
+
+    It's structurally zero at rest pose, I,
+    aligned with the SMPL pose blendshape implementation
+
     Args:
-        poses: batch arrays of N*3 joints, float64, 
-               and whether a leading batch dim is allowed.
-
+        poses: batch arrays of shape (N, 69) numbers, float64.
+               A single (69, ) pose is valid too.
     Returns:
-        ndarray: (x, 209) float64. A batch (x) of flattened arrays (3,3) -> (9,) 
-                  of 23 body joints * 9
+        ndarray: (..., 207) float64.
+                i.e. A batch (x) of flattened arrays (3,3) -> (9,)
+                of 23 body joints * 9
     """
-    foo = []
+    # batch is either () or (N) - slice a tuple to get back a tuple
+    batch = poses.shape[:-1]
+    # -1 shall always be the data axis
+    data_shp = poses.shape[-1]
+    if data_shp != BODY_POSE_DIM:
+        msg = (
+            f"expected {BODY_POSE_DIM} joints in the pose feature data axis. "
+            f"Got shape {poses.shape}"
+        )
+        raise ValueError(msg)
+    # 1 - keep the batch, then reshape
+    feature = poses.reshape(*batch, N_BODY_JOINTS, N_JOINT_AXIS)
+    # 2 - call aa_to_rotmax
+    # 3 - subtract the identity matrix - will broadcast
+    r_k = aa_to_rotmat(feature) - np.identity(N_JOINT_AXIS)
+    # 4 - reshape (batch, 3, 3) -> (batch, 207)
+    return r_k.reshape(*batch, N_FEATURE_DIM)
 
-    def bar(x: np.ndarray):
-        # 1 -reshape to (,3) axis-angle vectors
-        feature = x.reshape(-1, 3)
-        print(feature.shape)
-        # 2 - call aa_to_rotmax
-        # 3 - subtract the identity matrix
-        r_k = aa_to_rotmat(feature) - np.identity(3)
-        # 4 - flatten -> (9,) and return
-        return r_k.flatten()
 
-    if len(poses.shape) == 1:
-        return bar(poses)
-
-    for pose in poses:
-        foo.append(bar(pose))
-    # n.b this will stack the batch as rows (provided they're equal length)
-    # np.array does this, but this is explicit
-    return np.stack(foo)
+# S2 - frame conversion `D != gamma`
