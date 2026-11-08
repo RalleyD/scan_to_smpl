@@ -56,29 +56,31 @@ from scantosmpl.utils.geometry import aa_to_rotmat  # noqa: F401  (yours to use)
 
 
 def world_rotations(
-        global_orient: np.ndarray[np.float64],
-        body_pose: np.ndarray[np.float64],
-        parents: np.ndarray[int]) -> np.ndarray[tuple[int, int, np.float64]]:
+        global_orient: np.ndarray[tuple[int], np.dtype[np.float64]],
+        body_pose: np.ndarray[tuple[int], np.dtype[np.float64]],
+        parents: np.ndarray[tuple[int], np.dtype[np.float64]]
+) -> np.ndarray[tuple[int, int, int], np.dtype[np.float64]]:
     """Local axis-angle per joint -> world rotation per joint, down the kinematic tree."""
+    # input joints start with the root
+    joints = np.concatenate((global_orient, body_pose))
+    # joints are flat arrays, convert to axis-angle dimensions
+    joints = joints.reshape(-1, 3)
     # 1: allocate output array
-    # 1:1: world = np.empty((3,3,3))
-    # 2: fill root (global orient) (np.concatenate) => joints
-    # 2.1: joints.reshape(-1,3)
-    # 2.2: R_local = aa_to_rotmax(joints) # broadcast
-    # 2.2: output[0] = R_local[0]
-    # 3: for k in range(1, len(R_local))
-    # 4.1: parent = parents[k]
-    # 4.2: world[k] = world[parent] @ R_local[k]
-    # ---
+    worlds = np.empty((len(joints), 3, 3))
+    # R_local broadcast AA->Rotaion matrix
+    # - describes a twist inside the parent's frame
+    R_local = aa_to_rotmat(joints)
+    # root has no parent, world roation == R_local
+    worlds[0] = R_local[0]
 
-    # r_local = aa_to_rotmax(joint_axis_angles)
-    # - relative to parent's frame
-    # - root joint: has no parent, world rotation == R_local
-    # world rotation = parent's world @ R_local
-    # - R_local describes a twist inside the parent's frame.
-    # - Parent's world rotation carries the result
-    # - thererfore, a matrix product apples right-hand factor first, putting R_local on the right
-    raise NotImplementedError
+    for k in range(1, len(R_local)):
+        parent = parents[k]
+        # world rotation relative to the parent's frame
+        # i.e. Parent's world rotation carries the result
+        # - matrix product apples right-hand factor first
+        worlds[k] = worlds[parent] @ R_local[k]
+
+    return worlds
 
 
 def blend_matrices():
