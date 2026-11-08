@@ -77,7 +77,8 @@ def _posed_scene(seed: int = 0, n_verts: int = 500, n_joints: int = 24):
     skin_w = _random_skin_weights(rng, n_verts, n_joints)
     global_orient = rng.normal(0.0, 0.6, 3)
     body_pose = rng.normal(0.0, 0.6, 3 * (n_joints - 1))
-    M = blend_matrices(world_rotations(global_orient, body_pose, parents), skin_w)
+    M = blend_matrices(world_rotations(
+        global_orient, body_pose, parents), skin_w)
     return global_orient, body_pose, parents, skin_w, M
 
 
@@ -113,7 +114,8 @@ class TestWorldRotations:
         """
         parents = np.array([-1, 0])
         Rp, Rl = _rot("x", 90), _rot("y", 90)
-        assert not np.allclose(Rp @ Rl, Rl @ Rp), "test is vacuous if these commute"
+        assert not np.allclose(
+            Rp @ Rl, Rl @ Rp), "test is vacuous if these commute"
 
         R = world_rotations(rotmat_to_aa(Rp), rotmat_to_aa(Rl), parents)
 
@@ -130,8 +132,10 @@ class TestWorldRotations:
 
         R = world_rotations(global_orient, body_pose, parents)
 
-        np.testing.assert_allclose(R[1], _rot("x", 30) @ _rot("y", 50), atol=ROUNDOFF)
-        np.testing.assert_allclose(R[2], _rot("x", 30) @ _rot("z", -70), atol=ROUNDOFF)
+        np.testing.assert_allclose(R[1], _rot(
+            "x", 30) @ _rot("y", 50), atol=ROUNDOFF)
+        np.testing.assert_allclose(R[2], _rot(
+            "x", 30) @ _rot("z", -70), atol=ROUNDOFF)
 
     def test_global_orient_rotates_every_joint(self):
         """Turning the whole subject by G turns every world rotation by G: `R_k -> G R_k`.
@@ -156,7 +160,8 @@ class TestWorldRotations:
         before its child asks for it. SMPL guarantees `parents[k] < k`; anything else
         handed in would silently read an unfilled (or stale) slot. Fail loudly instead.
         """
-        parents = np.array([-1, 2, 0])  # joint 1's parent is joint 2, not yet built
+        parents = np.array(
+            [-1, 2, 0])  # joint 1's parent is joint 2, not yet built
         with pytest.raises(ValueError):
             world_rotations(np.zeros(3), np.zeros(6), parents)
 
@@ -171,16 +176,19 @@ class TestWorldRotations:
         smplx = pytest.importorskip("smplx")
         from smplx.lbs import batch_rigid_transform, batch_rodrigues
 
-        model = smplx.create("models", model_type="smpl", gender="neutral", dtype=torch.float64)
+        model = smplx.create("models", model_type="smpl",
+                             gender="neutral", dtype=torch.float64)
         parents = model.parents.numpy()
         rng = _rng(2)
         global_orient = rng.normal(0.0, 0.6, 3)
         body_pose = rng.normal(0.0, 0.6, 69)
 
-        full = torch.tensor(np.concatenate([global_orient, body_pose]).reshape(24, 3))
+        full = torch.tensor(np.concatenate(
+            [global_orient, body_pose]).reshape(24, 3))
         rot_mats = batch_rodrigues(full).reshape(1, 24, 3, 3)
         joints = (model.J_regressor @ model.v_template)[None]
-        _, A = batch_rigid_transform(rot_mats, joints, model.parents, dtype=torch.float64)
+        _, A = batch_rigid_transform(
+            rot_mats, joints, model.parents, dtype=torch.float64)
 
         R = world_rotations(global_orient, body_pose, parents)
 
@@ -197,6 +205,7 @@ class TestBlendMatrices:
 
         M = blend_matrices(R, skin_w)
 
+        # N lots of 3x3 blend matrices
         assert M.shape == (100, 3, 3)
         assert M.dtype == np.float64
 
@@ -225,7 +234,8 @@ class TestBlendMatrices:
 
         assert np.linalg.det(M) < 0.99
         assert not np.allclose(M.T @ M, np.eye(3), atol=1e-3)
-        np.testing.assert_allclose(M, 0.5 * (np.eye(3) + _rot("x", 90)), atol=ROUNDOFF)
+        np.testing.assert_allclose(
+            M, 0.5 * (np.eye(3) + _rot("x", 90)), atol=ROUNDOFF)
 
 
 class TestRoundTrip:
@@ -253,7 +263,8 @@ class TestRoundTrip:
         delta_hat = to_local(to_posed(delta_true, M), M)
 
         assert delta_hat.shape == delta_true.shape
-        np.testing.assert_allclose(delta_hat, delta_true, rtol=0, atol=ROUNDOFF)
+        np.testing.assert_allclose(
+            delta_hat, delta_true, rtol=0, atol=ROUNDOFF)
 
     def test_to_posed_is_skinning_applied_to_the_delta(self):
         """Pinned against an independently written answer, not just its inverse.
@@ -266,7 +277,8 @@ class TestRoundTrip:
 
         expected = np.einsum("vij,vj->vi", M, delta)
 
-        np.testing.assert_allclose(to_posed(delta, M), expected, rtol=0, atol=ROUNDOFF)
+        np.testing.assert_allclose(
+            to_posed(delta, M), expected, rtol=0, atol=ROUNDOFF)
 
     def test_to_local_inverts_skinning_not_its_transpose(self):
         """Same idea from the other side: feed `M @ delta`, demand `delta` back. A
@@ -276,9 +288,11 @@ class TestRoundTrip:
         D_posed = np.einsum("vij,vj->vi", M, delta)
 
         transpose_answer = np.einsum("vji,vj->vi", M, D_posed)
-        assert np.abs(transpose_answer - delta).max() > 1e-3, "test is vacuous otherwise"
+        assert np.abs(transpose_answer -
+                      delta).max() > 1e-3, "test is vacuous otherwise"
 
-        np.testing.assert_allclose(to_local(D_posed, M), delta, rtol=0, atol=ROUNDOFF)
+        np.testing.assert_allclose(
+            to_local(D_posed, M), delta, rtol=0, atol=ROUNDOFF)
 
     def test_exactly_three_vertices(self):
         """The numpy trap. `np.linalg.solve(a, b)` with `a` (V,3,3) and `b` (V,3) treats
@@ -311,7 +325,8 @@ class TestEquivariance:
 
         G = _rot("z", -120) @ _rot("y", 75)
         turned = rotmat_to_aa(G @ aa_to_rotmat(global_orient))
-        M_turned = blend_matrices(world_rotations(turned, body_pose, parents), skin_w)
+        M_turned = blend_matrices(world_rotations(
+            turned, body_pose, parents), skin_w)
         D_turned = D_posed @ G.T  # each row d -> G d
 
         np.testing.assert_allclose(
@@ -347,11 +362,13 @@ class TestConditioning:
         D_posed = np.zeros((5000, 3))
 
         e_ok = 1e-5  # cond ~ 2e5
-        to_local(D_posed, self._matrices_with_one_bad_vertex(4321, 180.0 - np.rad2deg(e_ok)))
+        to_local(D_posed, self._matrices_with_one_bad_vertex(
+            4321, 180.0 - np.rad2deg(e_ok)))
 
         e_bad = 1e-6  # cond ~ 2e6
         with pytest.raises(ValueError, match=r"\b4321\b"):
-            to_local(D_posed, self._matrices_with_one_bad_vertex(4321, 180.0 - np.rad2deg(e_bad)))
+            to_local(D_posed, self._matrices_with_one_bad_vertex(
+                4321, 180.0 - np.rad2deg(e_bad)))
 
 
 @pytest.fixture(scope="module")
@@ -382,14 +399,18 @@ class TestAgainstRealSMPL:
         from smplx.lbs import batch_rigid_transform, batch_rodrigues
 
         rng = _rng(40)
-        full = np.concatenate([rng.normal(0.0, 0.6, 3), rng.normal(0.0, 0.6, 69)])
-        rot_mats = batch_rodrigues(torch.tensor(full.reshape(24, 3))).reshape(1, 24, 3, 3)
+        full = np.concatenate(
+            [rng.normal(0.0, 0.6, 3), rng.normal(0.0, 0.6, 69)])
+        rot_mats = batch_rodrigues(torch.tensor(
+            full.reshape(24, 3))).reshape(1, 24, 3, 3)
         joints = (smpl.J_regressor @ smpl.v_template)[None]
-        _, A = batch_rigid_transform(rot_mats, joints, smpl.parents, dtype=torch.float64)
+        _, A = batch_rigid_transform(
+            rot_mats, joints, smpl.parents, dtype=torch.float64)
         A = A[0].numpy()
         skin_w = smpl.lbs_weights.numpy()
 
-        T = np.einsum("vk,kij->vij", skin_w, A)  # per-vertex 4x4, exactly as smplx's lbs
+        # per-vertex 4x4, exactly as smplx's lbs
+        T = np.einsum("vk,kij->vij", skin_w, A)
 
         def skin(v: np.ndarray) -> np.ndarray:
             return np.einsum("vij,vj->vi", T[:, :3, :3], v) + T[:, :3, 3]
@@ -400,7 +421,8 @@ class TestAgainstRealSMPL:
 
         M = blend_matrices(A[:, :3, :3], skin_w)
 
-        np.testing.assert_allclose(to_local(D_posed, M), delta, rtol=0, atol=ROUNDOFF)
+        np.testing.assert_allclose(
+            to_local(D_posed, M), delta, rtol=0, atol=ROUNDOFF)
 
     def test_conditioning_stays_finite_across_a_pose_sweep(self, smpl):
         """D1 says real skinning weights never approach the singular case. Prove it on the

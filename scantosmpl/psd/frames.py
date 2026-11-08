@@ -74,7 +74,10 @@ def world_rotations(
     worlds[0] = R_local[0]
 
     for k in range(1, len(R_local)):
+        # SMPL guarantees parents[k] < k
         parent = parents[k]
+        if parent >= k:
+            raise ValueError
         # world rotation relative to the parent's frame
         # i.e. Parent's world rotation carries the result
         # - matrix product apples right-hand factor first
@@ -83,9 +86,46 @@ def world_rotations(
     return worlds
 
 
-def blend_matrices():
-    """World joint rotations + skinning weights -> per-vertex blended matrix `M_v`."""
-    raise NotImplementedError
+def blend_matrices(
+        rot_mat_world: np.ndarray[tuple[int, int, int], np.dtype[np.float64]],
+        skin_weights: np.ndarray[tuple[int, int],
+                                 np.dtype[np.dtype[np.float64]]]
+) -> np.ndarray[tuple[int, int, int], np.dtype[np.float64]]:
+    """
+    World joint rotations + skinning weights -> per-vertex blended matrix `M_v`.
+    i.e. A blended LBS transform for a given vertex.
+
+    The same mix of joint rotations that LBS applies to a given vertex.
+
+    Side note:
+      Rotations only, no translations. LBS uses full transforms
+        [R_k | t_k], but gamma is an offset, not a point.
+        Translation doesn't move offsets.
+
+    Args:
+      rot_mat_world (ndarray): Pure world rotations (R_k)
+                               shape (k, 3, 3)
+      skin_weights (ndarray): For a given vertex, there are 24 joint-based
+                              blend weights. Shape (vertices, joints) ->
+                              (v, k)
+    """
+    # sum over joints (k), giving per-vertex (v) output
+    # a scalar times a 3x3, summed; k is contracted.
+    # M[v] = sum_k( w[v, k] * R[k] )
+    # the output is the dot product of:
+    # - the vth row of the skin weights w[v, :] -> the vertex's per-joint weights
+    # - across each k matrix element (a,b) -> R[:, a, b]
+    # - then each joint matrix summed.
+    # this is the blending of vertex joint weights
+    # - with joint rotation matrices
+    # i.e. scale each matrix by it's corresponding weight
+    # - then sum the matrixes together.
+    # einsum does the dot product and sum for each vertex
+    return np.einsum(
+        "vk,kab->vab",
+        skin_weights,
+        rot_mat_world
+    )
 
 
 def to_local():
